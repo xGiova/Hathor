@@ -1,6 +1,7 @@
 # Module: `hathor-dsp-measure`
 
-> Status: **specification** (M0: alignment; M3: masking meter). Expected dependencies:
+> Status: **specification** (M0: alignment; M3: masking meter; M6: level tracking for the
+> gain-staging calibration contract). Expected dependencies:
 > `hathor-dsp-core`, `hathor-dsp-filters` (for the key filter and `db_to_lin`), `hathor-dsp-fft` (for the fast
 > cross-correlation in M3).
 
@@ -61,6 +62,29 @@ The returned structure is preallocated (`MaskingFrame { bands: [f32; N_BANDS], .
 copies it off the audio thread with a double buffer (`Arc` swap, architecture §2), never a
 `Vec` allocated per analysis frame.
 
+### M6 — level tracking for the calibration contract (planned API)
+
+The mixer's "analog sweet-spot" guide is measurement, so it lives here, not in a UI crate
+(policy and ownership: [hathor-calibration-variance.md](hathor-calibration-variance.md)):
+
+```rust
+pub struct RmsTracker { /* one-pole mean-square state + coefficient */ }
+impl RmsTracker {
+    pub fn new(tau_s: f32) -> Self;                    // UI thread; τ = 300 ms for the meter
+    pub fn process_block(&mut self, block: &Block);    // audio rate: zero alloc, ~2 FMA/frame (expected)
+    pub fn rms_db(&self) -> f32;                       // read at UI rate (atomics/double buffer)
+}
+```
+
+* **One-pole on mean-square, τ semantics shared with `SmoothedParam`** (`τ = time_s`,
+  63 % in one τ): the block-rate `rms_db(block)` stays exactly what it is (per-block truth),
+  the tracker adds the *running* window the human eye needs. Two numbers, two questions —
+  same doctrine as correlation vs optimal lag below.
+* **Calibration metering** is a consumer-side classification, not new math: the UI maps
+  `rms_db` onto the sweet-spot band `reference_dbfs ± window` (−20…−14 dBFS by default).
+  The band lives in the channel-strip contract doc; this crate only supplies honest dBFS,
+  invariant 2 keeps that reference ±1.0 and silence = `f32::NEG_INFINITY`.
+
 ## Invariants
 
 1. No function allocates per call. Analysis buffers: either a slice owned by the caller, or
@@ -97,6 +121,10 @@ the kick↔bass plugin's UI shows both.
   already mapped in the ROADMAP.
 * **Transient detection** → M3, inside the kick↔bass plugin: the nudge "to the transient" is needed
   there; writing it earlier without its consumer (the nudge UI) means guessing the API.
+* **Sweet-spot classification** (is this reading "in the analog window"?) → M6: the math is
+  `RmsTracker` + a comparison with the strip's `reference_dbfs`; the band itself belongs to the
+  channel-strip contract ([hathor-calibration-variance.md](hathor-calibration-variance.md)),
+  not to a measurement library. Writing it into this API before its consumer exists = guessing.
 
 ## Exercises (once it exists)
 

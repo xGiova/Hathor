@@ -40,6 +40,7 @@ Three design sources, decomposed into cheap parts and expensive parts (§6).
 | G2 | M1 | Is the analyzer already useful compared to SPAN? | The suite stays the engine, the kick↔bass plugin (M3) becomes the first product. |
 | G3 | M3 | Is the kick/bass tool something other people *use*? | The project becomes "my private DAW": host scope cut down to mixer+editing. |
 | G4 | M5 | Does the host hold 40 tracks at 64 samples? | Cut advanced editing (M6) and stay "mixer + plugin host". |
+| G5 | M6.5 spike | Do NAM-class neural captures fit the 64/48k budget on this machine, inside the zero-alloc contract, at a usable share of the model library? | NN hosting stays *outside* the DAW (the NAM plugin loads through the VST3 bridge); the calibration & variance contract ships unchanged (M6) — it was never NAM-only. |
 
 ---
 
@@ -71,6 +72,10 @@ daw/
 | cpal MSRV | **1.85**, Windows 10 minimum. Default backend **WASAPI**, `asio` optional, `realtime` raises the thread priority. | ibid. |
 | cpal license | Apache-2.0 (compatible with our choice). | ibid. |
 | `BufferSize::Fixed(n)` | exists; `device.default_output_config()?.buffer_size()` gives the valid ranges. | ibid. |
+| NAM core / plugin / trainer licenses | `NeuralAmpModelerCore`, `NeuralAmpModelerPlugin`, `neural-amp-modeler` (trainer): all **MIT** (API `license` field). Official plugin shell = **iPlug2**, permissive custom text (full text not read: NOT VERIFIED). | [core](https://github.com/sdatkinson/NeuralAmpModelerCore) · [plugin](https://github.com/sdatkinson/NeuralAmpModelerPlugin) · [trainer](https://github.com/sdatkinson/neural-amp-modeler) |
+| The `.nam` **format** | JSON with keys `version/metadata/architecture/config/weights`; architectures `Linear · ConvNet · Recurrent(LSTM) · WaveNet`; `export_onnx` raises `NotImplementedError` (ONNX is not the distribution path). Reading the MIT exporter is the spec. | [exportable.py](https://github.com/sdatkinson/neural-amp-modeler/blob/main/nam/models/exportable.py) |
+| Permissive reimplementations already exist | `NeuralAmpModeler-rs` (**Apache-2.0**, pure-Rust realtime NAM engine, young: 2026-07), `nam-binary-loader`/.namb (**MIT**, binary format spec), `nam-loader` Android (**Apache-2.0**). GPL family (LV2 port, AIDA-X **GPL-3.0**) is read-only prior art. | [NeuralAmpModeler-rs](https://github.com/fabiohl/NeuralAmpModeler-rs) · [nam-binary-loader](https://github.com/tone-3000/nam-binary-loader) · [AIDA-X](https://github.com/AidaDSP/AIDA-X) |
+| NN inference crates in Rust | `tract` (sonos): **MIT OR Apache-2.0**, production streaming ASR — but MSRV badge **1.91 > our 1.85**, and NAM has no ONNX export. `ort` **Apache-2.0** over ONNX Runtime **MIT**: thread pools + allocations by design, wrong shape for `process()`. `candle` **Apache-2.0**: allocates per forward; offline tools only. The relevant prior art for a **zero-alloc callback** engine is `RTNeural` (**BSD-3-Clause**, C++), which is what AIDA-X uses. | [tract](https://github.com/sonos/tract) · [ort](https://github.com/pykeio/ort) · [candle](https://github.com/huggingface/candle) · [RTNeural](https://github.com/jatinchowdhury18/RTNeural) |
 
 **To verify** — research landed 2026-10-27 (license agent); resolved items keep their source:
 
@@ -80,8 +85,9 @@ daw/
 - [x] `rtrb`: fine for our use, but **strictly SPSC** (one producer, one consumer) — the design assumed exactly that. <https://crates.io/api/v1/crates/rtrb>
 - [x] `rustfft`: fine as the dev-dependency reference (and our test bench). <https://crates.io/api/v1/crates/rustfft>
 - [x] VST3 SDK license: **MIT** since 2026 — <https://raw.githubusercontent.com/steinbergmedia/vst3sdk/master/LICENSE.txt> (already in the §1 table); CLAP spec/headers: **MIT**, ASIO SDK: user-side download only, cpal: WASAPI default + optional `asio` feature — <https://raw.githubusercontent.com/RustAudio/cpal/master/README.md>.
+- [x] NAM hosting research (calibration & variance feature, spec §6–7): core/plugin/trainer **MIT**, `.nam` = JSON emitted by MIT code, three independent permissive loader reimplementations, AIDA-X/LV2 = GPL (study-only), RTNeural = BSD-3 (concepts prior art), tract MSRV 1.91 **conflicts with our 1.85** — full table + license verdict in [docs/modules/hathor-nam.md](docs/modules/hathor-nam.md). Lesson repeated from the `Herrie` entry: the earlier internal note said `steveatkinson/…` — the real GitHub user is **`sdatkinson`**; the correction is recorded, not silently applied.
 
-**Still to verify** (TD-07 shrunk to exactly this): the **ASIO EULA text inside the SDK zip** (we know it is not redistributable; the license terms themselves unread), the exact **CLAP C-ABI wording** (the "stable ABI" claim in the spec, not the license), the **rustfft `rfft` API** shape for the real-FFT wrapper.
+**Still to verify** (TD-07 shrunk to exactly this): the **ASIO EULA text inside the SDK zip** (we know it is not redistributable; the license terms themselves unread), the exact **CLAP C-ABI wording** (the "stable ABI" claim in the spec, not the license), the **rustfft `rfft` API** shape for the real-FFT wrapper. Plus, opened by the M6.5 spike (G5): the **`.nam` `metadata` gain/loudness semantics** (keys verified, meaning not), the **iPlug2 license full text**, tract's **vendored proto exclusion** (tensorflow/onnx protos) audit before shipping it, **model cost distribution** in a public capture library (nothing about per-block CPU is asserted before the spike measures it), and the **maturity** of `NeuralAmpModeler-rs` if it is ever considered as a dependency or validation oracle.
 
 ---
 
@@ -182,10 +188,53 @@ Acceptance: 40 tracks + 3 third-party plugins per track (one of them with a decl
 The visually biggest part and technically the least audio one. See §6 for the **cheap/expensive** decomposition of each wish: this is where the most months are saved.
 
 - Mixer: dense strips, colors/labels, foldback, visible routing, crossfader.
+- **Gain-staging & calibration engine + analog channel variance** (the NAM spec §6–7
+  contract — mixer-wide, *not* NAM-only): the strip's `G_cal` multiply at chain input, the
+  configurable reference window −20…−14 dBFS (default −18), per-channel drift vectors hashed
+  from `(channel_id, console_seed)` and persisted with the track, the 300 ms sweet-spot
+  meter (`hathor-dsp-measure` API), post-drive auto-makeup (instantaneous mode; look-ahead
+  mode gated on M5's real PDC). Spec:
+  [docs/modules/hathor-calibration-variance.md](docs/modules/hathor-calibration-variance.md)
+  — ≈15–25 h of this phase (estimate), absorbed inside the range; the primitives (RMS
+  tracker) can ride M0/M1 because they are five lines of honest math.
 - Audio editing: fade tool with curves, crossfade (equal-power), slip/modeless edit, **tab-to-transient**, snapping to grid/transients, non-destructive comping, **waveform rendering with LOD/tiles** (not a naive `Painter`: this is where timelines die).
 - Workflow: global non-modal shortcut system, palette, keyboard-driven editing.
 
-Acceptance: a 30-minute waveform over 40 tracks scrollable at **60 fps**; editing 20 clips with fade+crossfade without click errors; every editing operation reachable **without a mouse**; a 20-minute editing session without the project becoming inconsistent.
+Acceptance: a 30-minute waveform over 40 tracks scrollable at **60 fps**; editing 20 clips with fade+crossfade without click errors; every editing operation reachable **without a mouse**; a 20-minute editing session without the project becoming inconsistent. Calibration & variance: drift vectors reload **bit-identical** (100× serialize/reload test); the sweet-spot meter criterion and the `bench/` cost delta per the acceptance list of the calibration doc (numbers measured at close, never asserted now); the kick↔bass phase tool displays per-strip drift with variance ON — variance deliberately breaks exact inter-channel phase coherence, and the meters are required to stay truthful about it.
+
+---
+
+### M6.5 — NAM model hosting (80–140 h) ← **gated by G5**
+
+**Objective:** load `.nam` captures (Neural Amp Modeler format) and run them as ordinary
+zero-alloc `Node`s — the first *consumer* that makes the M6 calibration contract observable.
+**Scope decided (2026-10-27, user): in-tree core crate only — no CLAP bundle at M6.5.** NAM
+hosting is a feature of the DAW, not a distributable plugin; principle 1 still governs the
+native suite, not this host.
+
+Deliverables (all research/licensing verified in
+[docs/modules/hathor-nam.md](docs/modules/hathor-nam.md)):
+
+- **Spike first (~20–30 h, the M2.5 pattern)**: loader (Linear/WaveNet) + scalar inference
+  inside `Chain`, validated against the trainer's own exported input/output snapshot pairs
+  (CONVENTION §4: external reference, not self-agreement), and **benchmarked at 64/48k on a
+  spread of public captures** → gate **G5** answers with a committed `bench/` report, before
+  the milestone is trusted.
+- `hathor-nam` crate: `.nam` JSON loader at `setup()`, causal convnet kernels
+  (Linear → WaveNet → ConvNet; LSTM deferred), history rings sized at setup,
+  `latency_samples() = 0` declared honestly (causal FIR-over-history — no lookahead by
+  construction), model metadata plumbed for per-slot input trim seeding.
+- **Not in scope (decided 2026-10-27):** a CLAP wrapper around the same core. If that ever
+  changes, the license verdict in the module doc already holds for it.
+
+Acceptance: inference matches the reference snapshot pairs within a documented, justified
+tolerance (set against the first real diff, not guessed now); 20,000 cycles at 64/48k inside
+`AudioSection` with **0 allocations**; G5 measured share of a sample of public captures that
+run at 64/48k on the dev machine, printed and committed; license posture re-checked per §1
+rows (no GPL-derived code; the verdict text lives in the module doc). G5 budget posture
+(decided 2026-10-27): if heavier captures do not fit the 64/48k budget, a documented
+"NN inserts: 128-frame blocks recommended" closes the milestone — the measured distribution
+is still committed; we document reality, we do not lower the target quietly.
 
 ---
 
@@ -214,7 +263,12 @@ Wavetable + warp + FM + multimode filter + unison/detune + modulation matrix + G
 | M4 | 400–600 | 1,195 |
 | M5 | 500–700 | 1,895 |
 | M6 | 600–900 | 2,795 |
-| M7 | 150–250 | 3,045 |
+| M6.5 | 80–140 | 2,935 |
+| M7 | 150–250 | 3,185 |
+
+*(2026-10-27: M6.5 (NAM hosting) inserted; M7 cumulative recomputed from the upper bounds
+(2,795 → 2,935 → 3,185). The calibration & variance contract was absorbed into M6's range —
+it fits inside a ±300 h uncertainty band.)*
 
 **~10 h/week**: M3 (the kick↔bass plugin, usable on its own) in **12-15 months**; M6 (a DAW you can work in) in **5-6 years**.
 **~25 h/week**: the plugin in ~6 months; a usable host in ~2.5 years.
@@ -233,6 +287,7 @@ Practical and non-negotiable consequence: **the kick↔bass plugin (M3) must be 
 | Burnout on a 3,000 h project | lethal | Every phase has a deliverable usable *outside*. If M3 delights you, you keep going. |
 | Scope creep "let me also take from Reaper…" | high | If a feature is not in §0/§6, it goes to `NON-GOALS` and comes back only after G3. |
 | ASIO: LLVM+SDK, non-reproducible build | medium | Default WASAPI (already decided); ASIO = documented opt-in feature, never required for CI. |
+| NN inference (M6.5) may not fit the block budget — model sizes are not ours to choose | medium (a feature dies, not the structure) | G5: the spike **measures** a spread of public captures before any commitment; the calibration & variance contract (M6) was deliberately designed to stand alone, so "no" costs a milestone, not an architecture. |
 | Denormals / CPU jitter | medium | FTZ/DAZ in the contract, allocation guard in every plugin's tests. |
 
 ---

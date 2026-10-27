@@ -52,6 +52,27 @@ impl Chain {
 * Modification with the stream running: a command queue (rtrb) towards the audio thread, which
   applies it between blocks. Never mutate the topology *during* `process`.
 
+### M6 — the channel strip: owner of `G_cal` and the variance vector (planned)
+
+The strip is a `Chain` plus host policy — the policy is specified in
+[hathor-calibration-variance.md](hathor-calibration-variance.md); what *this* module owns:
+
+* **One `GainStagingNode` at chain input**, applying the strip's `G_cal` multiply
+  (calibration reference × user trim × drift bias, coefficient computed at UI/setup rate,
+  ramped with `SmoothedParam` at frame rate). `latency_samples() = 0` and it tells the truth:
+  the multiply is memoryless.
+* **The per-channel variance vector** (`ChannelDrift`, hashed from `channel_id` + the
+  project's console seed at track creation, persisted with the track) is *host-side data*:
+  the strip applies it to the **parameters** it feeds downstream (`f0 × (1 + eq_freq_drift)`
+  before any `design()`) and to `G_cal`. It never enters `hathor-dsp-filters` or any L2
+  crate — L2 does not know what a channel is (architecture §1).
+* **Latency compensation ownership, restated for level-sensitive inserts**: a node with
+  look-ahead (auto-makeup, the M4 limiter class, any future NN variant that buffers ahead)
+  *declares* `latency_samples`/`max_latency_samples`; the **M5 engine compensates** along
+  the path (architecture §4), the M5 arena pre-allocates compensation lines at
+  `max_latency_samples`. The strip never shifts time itself. This split is the precondition
+  for ever enabling a look-ahead makeup module on a mixer strip.
+
 ## Invariants
 
 1. `Chain::process` does not allocate. Test: `AudioSection` around 10,000 cycles with a chain
@@ -64,6 +85,10 @@ impl Chain {
    `chain_reports_summed_latency` exists for this.
 4. An `Err` from a node stops the chain and propagates: no implicit "skip the node and carry
    on" (the failure policy — mute, bypass, report — belongs to the M5 engine, not to the chain).
+5. (M6) The strip's `G_cal` multiplies **exactly once per block, at chain input**: no node in
+   the chain applies a second console-scale factor (contract and rationale:
+   [hathor-calibration-variance.md](hathor-calibration-variance.md)). A test with the strip
+   bypassed nulls dry, which is how the invariant gets enforced rather than asserted.
 
 ## Rust concepts to put into practice
 
@@ -75,7 +100,9 @@ index arena vs pointers (M5) · the `with(id, f)` closure as the only door to sh
 
 PDC and declared latency ([docs/it/dsp.md](../it/dsp.md) §5 + architecture §4) · implicit gain staging (the
 order of the nodes *is* the sound: EQ before or after the compressor is not the same thing —
-the M0 chain makes this experimentable in `hathor-audio-probe` with two configurations) · in-place
+the M0 chain makes this experimentable in `hathor-audio-probe` with two configurations) ·
+from M6, **explicit** gain staging too: the strip's `G_cal` gives the stream a defined
+absolute level for amplitude-sensitive consumers ([hathor-calibration-variance.md](hathor-calibration-variance.md)) · in-place
 processing and why the double buffer exists.
 
 ## Deferred (and why)

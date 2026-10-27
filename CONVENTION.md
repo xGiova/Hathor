@@ -89,7 +89,7 @@ deviations (§D).
 - Single developer: work on `main` for small things, branch for anything touching
   `unsafe`, threading or the ABI (`rt/`, `ffi/`). Merge: fast-forward or squash, linear
   readable history.
-- Tags: `v0.x.y` at every gate (G1…G4) reached, with the gate's numbers in the message.
+- Tags: `v0.x.y` at every gate (G1…G5) reached, with the gate's numbers in the message.
 
 ## 7. Licenses and prior art (see [docs/it/prior-art.md](docs/it/prior-art.md) §4)
 

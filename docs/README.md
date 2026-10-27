@@ -35,6 +35,8 @@ it uses · DSP concepts it embodies · What is deferred and why · Exercises.`
 | `hathor-dsp-fft` | spec (M0) | [modules/hathor-dsp-fft.md](modules/hathor-dsp-fft.md) |
 | `hathor-dsp-measure` | spec (M0) | [modules/hathor-dsp-measure.md](modules/hathor-dsp-measure.md) |
 | `hathor-host-graph` | spec (M0) | [modules/hathor-host-graph.md](modules/hathor-host-graph.md) |
+| gain staging & channel variance (M6 contract, policy not crate) | spec | [modules/hathor-calibration-variance.md](modules/hathor-calibration-variance.md) |
+| `hathor-nam` (proposed crate, gated G5) | draft spec (M6.5) | [modules/hathor-nam.md](modules/hathor-nam.md) |
 | `hathor-audio-probe` | spec (M0) | `modules/hathor-audio-probe.md` (spec due M0) |
 | `hathor-vst3-host` | spec (M5) | `modules/hathor-vst3-host.md` (spec due M5) |
 

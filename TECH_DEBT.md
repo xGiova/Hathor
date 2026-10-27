@@ -30,6 +30,8 @@ a future bug written down well.
 | TD-15 | Name: **Hathor** applied to README/ROADMAP/Cargo `repository`; still missing: per-source Apache-2.0 banner | A one-line header per file is only worth a dedicated mechanical commit | Next mechanical commit after the first push, together with CI |
 | TD-17 | `#[non_exhaustive]` absent on public enums that can grow (`FilterKind`, `FilterError`, `NodeError`, `AudioSectionError`) | STYLE.md §C.8; consumers (our own plugins first) must compile-match future variants | Small commit before any crates.io publish |
 | TD-18 | Subsonic designs (f/sr < ~1e-4): the stability margin is O(w0²) — **smaller than the coefficient ulp**, so f32 cannot represent the verdict honestly (the stability grid skips those ratios with a documented carve-out) | Real DAWs use f64 runtime states or cascaded 1st-order sections at those corners | Before any LP/HP below 20 Hz is used at 96/192 kHz by the M1 analyzer/EQ |
+| TD-19 | NAM spike residuals (research in [docs/modules/hathor-nam.md](docs/modules/hathor-nam.md)): `.nam` metadata gain/loudness **semantics NOT VERIFIED** (keys verified); iPlug2 full license text unread; tract's vendored tf/onnx proto license-exclusion audit; per-model CPU cost distribution unknown until the G5 spike measures it; `fabiohl/NeuralAmpModeler-rs` maturity (young, single maintainer) if ever a dependency or validation oracle | All deliberately deferred to the spike — the doc asserts nothing about them | At/before the M6.5 (G5) spike |
+| TD-20 | `sonos/tract` requires rustc ≥ 1.91 vs our pinned MSRV 1.85 — live only because tract could enter as an *offline* model-conversion tool, never in the callback | No feature depends on it today | The day any tract-based dependency is proposed |
 
 ## Closed (history — useful for understanding why certain rules exist)
 
@@ -63,5 +65,5 @@ a future bug written down well.
   accepted), and a plan with an *explicit trigger* ("when consumer X arrives").
 - Closed debt: **never deleted** — it migrates to "Closed" with the lesson. The register's
   value is double: the current inventory + the memory of the causes.
-- Each gate G1-G4 closes only with its own TD-0x zeroed or deliberately re-classified
+- Each gate G1-G5 closes only with its own TD-0x zeroed or deliberately re-classified
   (a re-classification is a `docs:` commit, not a disappearance).
