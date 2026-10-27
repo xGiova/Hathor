@@ -64,28 +64,46 @@ The returned structure is preallocated (`MaskingFrame { bands: [f32; N_BANDS], .
 copies it off the audio thread with a double buffer (`Arc` swap, architecture §2), never a
 `Vec` allocated per analysis frame.
 
-### M6 — level tracking for the calibration contract (planned API)
+### M6 — level tracking for the calibration contract (landed, tested — the primitive came early)
 
 The mixer's "analog sweet-spot" guide is measurement, so it lives here, not in a UI crate
-(policy and ownership: [hathor-calibration-variance.md](hathor-calibration-variance.md)):
+(policy and ownership: [hathor-calibration-variance.md](hathor-calibration-variance.md) §1 and
+§3 — the band and its `G_cal` are the strip's contract, the honest dBFS is this crate's):
 
 ```rust
-pub struct RmsTracker { /* one-pole mean-square state + coefficient */ }
+pub struct RmsTracker { /* mean_square + coef + tau_s — Copy, zero heap */ }
 impl RmsTracker {
-    pub fn new(tau_s: f32) -> Self;                    // UI thread; τ = 300 ms for the meter
-    pub fn process_block(&mut self, block: &Block);    // audio rate: zero alloc, ~2 FMA/frame (expected)
-    pub fn rms_db(&self) -> f32;                       // read at UI rate (atomics/double buffer)
+    pub fn new(tau_s: f32) -> Self;                           // UI thread; conservative default coef
+    pub fn set_time(&mut self, sample_rate: u32, tau_s: f32); // in setup(); NOT per block (it is an exp)
+    pub fn process_block(&mut self, block: &Block<'_>);       // audio rate: zero alloc, ~2 FMA/frame (expected)
+    pub fn rms_db(&self) -> f32;                              // read at UI rate (atomics/double buffer)
 }
 ```
 
-* **One-pole on mean-square, τ semantics shared with `SmoothedParam`** (`τ = time_s`,
-  63 % in one τ): the block-rate `rms_db(block)` stays exactly what it is (per-block truth),
-  the tracker adds the *running* window the human eye needs. Two numbers, two questions —
-  same doctrine as correlation vs optimal lag below.
+* **Why `new(tau_s)` alone is not enough** — the trap the original sketch hid: the coefficient
+  is `1 − exp(−1/(τ·fs))` and cannot exist before the sample rate does. `new` starts at
+  `SmoothedParam`'s conservative 1e-3 default — a meter silently running on a guessed time
+  constant is the bug class, so `set_time` in `setup()` is the contract, and
+  `default_coef_is_conservative_until_setup` pins the honest slow start (the first block of
+  full scale reads −12 dB, not 0).
+* **One-pole on mean-square, stepping once per frame on the channel-mean energy**
+  (`Σ_c x_c²/channels`), τ semantics shared with `SmoothedParam` (`τ = time_s`, 63 % in one τ —
+  both sides measured: rise to −1.99 dB, decay by −4.34 dB after exactly one τ): the
+  block-rate `rms_db(block)` stays exactly what it is (per-block truth), the tracker adds the
+  *running* window the human eye needs. Two numbers, two questions — same doctrine as
+  correlation vs optimal lag below.
+* **The regression test is this block's best documentation**: the first implementation stepped
+  the state sequentially in *channel order*, so with a full-scale ch0 and a silent ch1 the
+  silent last channel simply **won** — the meter read −57.9 dB where the truth was −3.01 dBFS
+  (frame energy `(1+0)/2`). `stereo_energy_averages_channels_not_the_last_one_wins` nailed the
+  channel-mean fix in place, and its long-run average *is* `rms_db`'s all-samples mean: one
+  doctrine, two windows. A `NaN` sample poisons the meter permanently and stays visible —
+  a broken signal must never decay into a reassuring silence.
 * **Calibration metering** is a consumer-side classification, not new math: the UI maps
   `rms_db` onto the sweet-spot band `reference_dbfs ± window` (−20…−14 dBFS by default).
-  The band lives in the channel-strip contract doc; this crate only supplies honest dBFS,
-  invariant 2 keeps that reference ±1.0 and silence = `f32::NEG_INFINITY`.
+  The band lives in the channel-strip contract (that doc §3); this crate only supplies honest
+  dBFS, invariant 2 keeps that reference ±1.0 and silence = `f32::NEG_INFINITY` —
+  `silence_keeps_silence` guards the muted-track case against ever "warming up".
 
 ## Invariants
 
