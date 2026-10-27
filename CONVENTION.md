@@ -90,6 +90,10 @@ deviations (§D).
   `unsafe`, threading or the ABI (`rt/`, `ffi/`). Merge: fast-forward or squash, linear
   readable history.
 - Tags: `v0.x.y` at every gate (G1…G5) reached, with the gate's numbers in the message.
+- Commit hygiene: **never `git add -A` / `git commit -a` while another session holds an
+  active write scope** — commit explicit pathspecs. (M0 incident, 2026-10-27: a blanket
+  `add -A` swept 17 half-written probe files into CI; the red badge was correct, the
+  committer was wrong.)
 - CI (`.github/workflows/ci.yml`) runs the same four gates as the local ones — fmt, clippy
   `-D warnings`, tests debug **and release** — on every push/PR to `main`, plus an MSRV job
   at the pinned 1.85. A red CI blocks the gate: "green on my machine" is not evidence. The
