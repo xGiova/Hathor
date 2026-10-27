@@ -1,0 +1,52 @@
+# Gates, not vibes: everything CI can prove without an audio device.
+# fmt + clippy(-D) + tests debug AND release (the release run is the real gate —
+# M0 learned twice that debug green proves nothing about optimizer behavior),
+# plus an MSRV job holding the line at 1.85. The G1 hardware run is deliberately
+# NOT here: GitHub runners have no WASAPI device; it is a measured, committed,
+# human-present session (ROADMAP §M0).
+name: CI
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  gates:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests (debug)
+        run: cargo test --workspace
+      - name: Tests (release - the gate)
+        run: cargo test --workspace --release
+
+  msrv:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The pinned floor in Cargo.toml (rust-version.workspace, TD history: it was
+      # declared but not inherited until 43b651c). Nothing may use newer APIs.
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - name: Check everything compiles at 1.85
+        run: cargo check --workspace --all-targets

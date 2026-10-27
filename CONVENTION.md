@@ -90,6 +90,11 @@ deviations (§D).
   `unsafe`, threading or the ABI (`rt/`, `ffi/`). Merge: fast-forward or squash, linear
   readable history.
 - Tags: `v0.x.y` at every gate (G1…G5) reached, with the gate's numbers in the message.
+- CI (`.github/workflows/ci.yml`) runs the same four gates as the local ones — fmt, clippy
+  `-D warnings`, tests debug **and release** — on every push/PR to `main`, plus an MSRV job
+  at the pinned 1.85. A red CI blocks the gate: "green on my machine" is not evidence. The
+  G1 hardware run is intentionally NOT in CI (runners have no audio device): it is a
+  measured human-present session whose numbers get committed with the `measured` label.
 
 ## 7. Licenses and prior art (see [docs/it/prior-art.md](docs/it/prior-art.md) §4)
 
