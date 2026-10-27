@@ -11,6 +11,9 @@ cpal.workspace = true
 rtrb.workspace = true
 hathor-dsp-core.workspace = true
 hathor-dsp-filters.workspace = true
+hathor-dsp-fft.workspace = true
+hathor-dsp-measure.workspace = true
+hathor-host-graph.workspace = true
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

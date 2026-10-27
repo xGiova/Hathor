@@ -261,7 +261,10 @@ version = "0.0.0"
 dependencies = [
  "cpal",
  "hathor-dsp-core",
+ "hathor-dsp-fft",
  "hathor-dsp-filters",
+ "hathor-dsp-measure",
+ "hathor-host-graph",
  "rtrb",
 ]
 
