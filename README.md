@@ -32,7 +32,7 @@ share — which is why the lower layers expose it honestly.
 | `crates/hathor-dsp-fft` | complex/real FFT, STFT front-end | M0–M1 | **implemented** (kernels; STFT front-end → M1) | 29/29 (debug+release) |
 | `crates/hathor-dsp-measure` | level/correlation/time-alignment, masking meter | M0–M1 | **implemented** (M0 API; masking → M1) | 54/54 (debug+release) |
 | `crates/hathor-host-graph` | node chain, scratch buffers, latency sum | M0–M5 | **implemented** (M0 Chain) | 12+1/12+1 (debug+release) |
-| `apps/hathor-audio-probe` | cpal/WASAPI harness, xrun proxy & cost bench | M0 | **implemented** (offline/bench green on the dev machine; live `run` awaits G1 consent) | 169/169 (debug+release) |
+| `apps/hathor-audio-probe` | cpal/WASAPI harness, xrun proxy & cost bench | M0 | **implemented** (G1 closed: live 60 s WASAPI run, 0 allocs, worst chunk 0.042× budget) | 169/169 (debug+release) |
 | `plugins/*` | EQ, Filter, SPAN-like, Compressor, Reverb, Delay, Saturator, kick↔bass phase-alignment plugin | M1–M4 | planned | — |
 | `crates/hathor-vst3-host` | C++ VST3 bridge (frozen ABI) | M5 | planned | — |
 | Channel-strip calibration & variance | `G_cal` gain-staging contract, seeded per-channel drift, sweet-spot meter | M6 | spec ([docs/modules/hathor-calibration-variance.md](docs/modules/hathor-calibration-variance.md)) | — |

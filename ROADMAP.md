@@ -95,7 +95,7 @@ daw/
 
 Hours = **real person-hours** (solo, including finishing work: tests + measurement, not "code for 3 hours and call it done"). The figures are professionally pessimistic, not enthusiastic.
 
-### M0 — The contract (25–45 h) ← **WE ARE HERE**
+### M0 — The contract (25–45 h) ✅ **closed 2026-10-27 at gate G1** (tag `v0.1.0`; criterion 7 half-recorded as TD-23)
 
 **Objective:** prove the model holds, and close the Rust vs C++ discussion with our own numbers.
 
@@ -128,8 +128,12 @@ Results, **measured 2026-10-27 on the dev machine** (release build, rustc 1.99.1
    (measure mode), the negative-control tests prove the counter is live in every binary that
    asserts zeros, and `pump::a_process_wide_reading_belongs_to_no_single_thread` demonstrates
    on demand why the process-wide reading belongs to no single thread.
-4. ⏳ live `run` at buffer 64 — **pending**: it is the G1 close event, a hardware session with
-   the owner present (the probe refuses to open a device without `--i-have-user-consent`).
+4. ✅ live `run`, executed with the owner 2026-10-27 (consent flag): SSL 2 default output @
+   48000 f32, 60.018 s, **6,002 callbacks / 48,025 chunks, 0 allocations (measure mode), 0
+   stream errors, 0 render failures**; worst chunk 56.1 µs = **0.042× budget** (< 0.40×
+   threshold) — verdict `0 FAIL, 1 warn of 10 checks → PASS`. The warn is the shared-mode
+   finding the probe was built to surface: the driver delivered 480..=1056-frame callbacks
+   against a 64-frame request, and the chunking pump absorbed every one.
 5. ✅ biquad vs the RBJ reference within 1e-6; own FFT vs `rustfft`: measured worst errors
    3.8e-6 (n=256) → 6.1e-5 (n=16384), assert holds the spec's 1e-4; real-FFT vs the padded
    complex reference 2.9e-6→4.6e-5, round-trip well inside 1e-6.
@@ -150,7 +154,7 @@ Unblocks: the language choice stops being a matter of faith. And you have a test
 
 ---
 
-### M1 — Multi-resolution engine + analyzer (120–180 h)
+### M1 — Multi-resolution engine + analyzer (120–180 h) ← **WE ARE HERE**
 
 **Objective:** build the most reusable DSP asset of the project, in the form of a plugin you actually use.
 
