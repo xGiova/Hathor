@@ -27,7 +27,6 @@
 use std::time::Instant;
 
 use hathor_dsp_core::alloc_guard;
-use rtrb::Consumer;
 
 use crate::cli::{OfflineOptions, Tone};
 use crate::cost_summary::CostSummary;
@@ -37,7 +36,7 @@ use crate::probe_error::ProbeError;
 use crate::pump::Pump;
 use crate::run_report::{self, Check, Measured, Severity};
 use crate::stamp;
-use crate::timing_ring::TimingDrain;
+use crate::timing_ring::{TimingDrain, DEFAULT_CAPACITY};
 
 /// The rehearsal's channel count: the M0 shape, stereo. A mono device is what `run`
 /// adapts to; nothing here needs to pretend otherwise.
@@ -48,15 +47,21 @@ pub const OFFLINE_CHANNELS: u16 = 2;
 /// drain (which allocates when the `Vec` grows) stays out of the per-chunk cost.
 pub const DRAIN_EVERY_CHUNKS: usize = 2_048;
 
+/// The drain period must leave room inside the ring, or the rehearsal would silently
+/// drop timing samples and report a cost summary built from a fraction of the run.
+/// Written as a subtraction rather than an `assert!`: an underflow here is a compile
+/// error, so the relation cannot rot into a passing test of a stale constant.
+const _: usize = DEFAULT_CAPACITY - DRAIN_EVERY_CHUNKS;
+
 /// The result of an offline rehearsal.
 #[derive(Debug)]
 pub struct OfflineOutcome {
     /// Cycles asked for.
     pub cycles: usize,
-    /// Sample rate the pump ran at.
+    /// Sample rate the chain was built for, as the pump reports it.
     pub rate: u32,
-    /// Channels.
-    pub channels: u16,
+    /// Channels the chain was built for, as the pump reports it.
+    pub channels: usize,
     /// Block shape.
     pub chunk_frames: u32,
     /// Analysis window in frames.
@@ -72,6 +77,13 @@ pub struct OfflineOutcome {
     pub real_seconds: f64,
     /// Ring capacity in samples.
     pub ring_capacity: usize,
+    /// Frames in the FFT window at the end of the loop (proves the analysis reached
+    /// full size, rather than reporting a transform count and hoping).
+    pub window_filled: usize,
+    /// The window's declared size in frames.
+    pub window_size: usize,
+    /// Timing samples the report kept out of `view.chunks` published.
+    pub samples_kept: usize,
 }
 
 impl OfflineOutcome {
@@ -168,6 +180,10 @@ impl OfflineOutcome {
                 },
                 self.simulated_seconds()
             ),
+            format!(
+                "analysis window: {}/{} frames at the end of the loop; {} of {} published sample(s) reached the report",
+                self.window_filled, self.window_size, self.samples_kept, self.view.chunks
+            ),
         ];
         out.extend(run_report::lines(&checks));
         out.push(live_stream::verdict_summary(&checks));
@@ -199,15 +215,25 @@ pub fn execute(o: &OfflineOptions) -> Result<OfflineOutcome, ProbeError> {
         o.cycles, o.frames, OFFLINE_CHANNELS, o.rate, o.fft_size
     );
     println!(
-        "pump: {} node(s) [{}], tone {} Hz, budget {:.2} µs/chunk",
+        "pump: {} node(s) [{}], tone {} Hz (step {}), latency {} samples, budget {:.2} µs/chunk, ring {} samples",
         pump.chain_names().len(),
         pump.chain_names().join(" → "),
         pump.actual_tone_hz(),
+        pump.tone_step(),
+        pump.chain_latency(),
         budget_ns as f64 / 1e3,
+        ring_capacity,
     );
     println!("guard: STRICT — the first allocation in a block aborts this process");
     alloc_guard::set_panic_on_audio_alloc(true);
     alloc_guard::reset_counters();
+    // The pump's own numbers, not the command line's: if the shape the chain was built
+    // for is not what was asked, this is where it becomes visible.
+    let pump_rate = pump.rate();
+    let pump_channels = pump.channels();
+    // Cold window by construction, so "the analysis took N cycles to start" is a fact
+    // of this loop rather than of what `setup` happened to leave behind.
+    pump.reset_analysis_window();
 
     let mut drain = TimingDrain::new(consumer, o.cycles.min(65_536));
     let start = Instant::now();
@@ -225,12 +251,16 @@ pub fn execute(o: &OfflineOptions) -> Result<OfflineOutcome, ProbeError> {
     alloc_guard::set_panic_on_audio_alloc(false);
 
     let view = counters.view();
+    // Read the drain before `into_samples` consumes it.
+    let samples_kept = if drain.is_empty() { 0 } else { drain.len() };
+    let window_filled = pump.window_filled();
+    let window_size = pump.window_size();
     let mut samples = drain.into_samples();
     let cost = CostSummary::from_samples(&mut samples, budget_ns);
     let outcome = OfflineOutcome {
         cycles: o.cycles,
-        rate: o.rate,
-        channels: OFFLINE_CHANNELS,
+        rate: pump_rate,
+        channels: pump_channels,
         chunk_frames,
         fft_size: o.fft_size,
         view,
@@ -238,6 +268,9 @@ pub fn execute(o: &OfflineOptions) -> Result<OfflineOutcome, ProbeError> {
         guard_allocs: alloc_guard::allocs_total(),
         real_seconds,
         ring_capacity,
+        window_filled,
+        window_size,
+        samples_kept,
     };
     Ok(outcome)
 }
@@ -286,6 +319,9 @@ mod tests {
             guard_allocs: allocs * cycles as u64,
             real_seconds: 0.1,
             ring_capacity: 16_384,
+            window_filled: 1_024,
+            window_size: 1_024,
+            samples_kept: chunks as usize,
         }
     }
 
@@ -339,10 +375,8 @@ mod tests {
     fn the_drain_period_and_channel_count_are_the_documented_ones() {
         assert_eq!(OFFLINE_CHANNELS, 2);
         assert_eq!(DRAIN_EVERY_CHUNKS, 2_048);
-        assert!(
-            DRAIN_EVERY_CHUNKS < 16_384,
-            "the ring must not be able to overflow between drains"
-        );
+        // The "drains happen well before the ring can fill" relation is not checked
+        // here: it is a `const` item in the module, so breaking it is a compile error.
         // A float cannot be a pattern, so the frequency is read out, not matched.
         let Tone::Sine(hz) = TONE else {
             panic!("the rehearsal's default tone must not be silence");

@@ -112,7 +112,11 @@ mod tests {
             w.push(&[f]);
         }
         assert_eq!(w.samples(), &[3.0, 4.0, 5.0, 6.0], "the last 4 of 6");
-        assert_eq!(w.filled(), 4, "filled clamps at size, it does not count forever");
+        assert_eq!(
+            w.filled(),
+            4,
+            "filled clamps at size, it does not count forever"
+        );
     }
 
     #[test]

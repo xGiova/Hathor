@@ -118,11 +118,6 @@ impl ToneGen {
         }
         self.index = i & mask;
     }
-
-    /// Silence without changing the phase (used for the tail of a failed block).
-    pub fn fill_silence(dst: &mut [f32]) {
-        dst.iter_mut().for_each(|s| *s = 0.0);
-    }
 }
 
 #[cfg(test)]
@@ -157,7 +152,10 @@ mod tests {
     fn sub_bin_frequencies_are_clamped_to_one_step_not_zero() {
         let (step, actual) = tone_step_and_actual_hz(1.0, 48_000);
         assert_eq!(step, 1, "a 0 step would emit DC while claiming to tone");
-        assert!(actual > 0.0, "and the printed frequency must match: {actual}");
+        assert!(
+            actual > 0.0,
+            "and the printed frequency must match: {actual}"
+        );
     }
 
     #[test]
@@ -178,7 +176,11 @@ mod tests {
         let mut cold = ToneGen::new(Tone::Sine(hz), 48_000);
         cold.fill(&mut c);
         assert_eq!(&a[..], &c[..8], "the first 8 frames match a cold start");
-        assert_eq!(&b[..], &c[8..], "phase continues across fills, it does not restart");
+        assert_eq!(
+            &b[..],
+            &c[8..],
+            "phase continues across fills, it does not restart"
+        );
     }
 
     #[test]
@@ -190,12 +192,11 @@ mod tests {
         let mut buf = [0.0f32; 7];
         for _ in 0..1_000 {
             t.fill(&mut buf);
+            assert!(t.index < TABLE_LEN, "index {} escaped the table", t.index);
             assert!(
-                t.index < TABLE_LEN,
-                "index {} escaped the table",
-                t.index
+                buf.iter().all(|s| s.abs() <= AMPLITUDE + 1e-6),
+                "bounded tone"
             );
-            assert!(buf.iter().all(|s| s.abs() <= AMPLITUDE + 1e-6), "bounded tone");
         }
     }
 
@@ -225,9 +226,14 @@ mod tests {
         let mut buf = [1.0f32; 64];
         t.fill(&mut buf);
         assert!(buf.iter().all(|s| *s == 0.0), "silence is zeros");
+        // Twice, from a non-zero buffer both times: the silent path must not leave a
+        // trace of the previous content behind.
         let mut buf2 = [7.0f32; 8];
-        ToneGen::fill_silence(&mut buf2);
-        assert!(buf2.iter().all(|s| *s == 0.0), "the failed-block tail is silence");
+        t.fill(&mut buf2);
+        assert!(
+            buf2.iter().all(|s| *s == 0.0),
+            "a second silent fill is still silence"
+        );
     }
 
     #[test]
@@ -235,6 +241,10 @@ mod tests {
         let mut t = ToneGen::new(Tone::Sine(440.0), 48_000);
         let mut nothing: [f32; 0] = [];
         t.fill(&mut nothing);
-        assert_eq!(t.step(), 38, "the step is a setup decision, not a per-call one");
+        assert_eq!(
+            t.step(),
+            38,
+            "the step is a setup decision, not a per-call one"
+        );
     }
 }

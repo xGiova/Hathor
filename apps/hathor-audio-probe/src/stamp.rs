@@ -115,37 +115,125 @@ mod tests {
     /// with leap years every 4 except 1900-style centuries) — see the comments.
     #[test]
     fn the_epoch_itself() {
-        assert_eq!(civil_from_days(0), Date { year: 1970, month: 1, day: 1 });
+        assert_eq!(
+            civil_from_days(0),
+            Date {
+                year: 1970,
+                month: 1,
+                day: 1
+            }
+        );
     }
 
     #[test]
     fn one_day_before_the_epoch_is_december_1969() {
-        assert_eq!(civil_from_days(-1), Date { year: 1969, month: 12, day: 31 });
+        assert_eq!(
+            civil_from_days(-1),
+            Date {
+                year: 1969,
+                month: 12,
+                day: 31
+            }
+        );
     }
 
     #[test]
     fn known_new_year_day_anchors() {
         // 18262 = 2020-01-01; +366 (2020 is a leap year) = 18628; +365×3 = 19723.
-        assert_eq!(civil_from_days(18_262), Date { year: 2020, month: 1, day: 1 });
-        assert_eq!(civil_from_days(18_628), Date { year: 2021, month: 1, day: 1 });
-        assert_eq!(civil_from_days(19_723), Date { year: 2024, month: 1, day: 1 });
-        assert_eq!(civil_from_days(20_089), Date { year: 2025, month: 1, day: 1 });
-        assert_eq!(civil_from_days(20_454), Date { year: 2026, month: 1, day: 1 });
+        assert_eq!(
+            civil_from_days(18_262),
+            Date {
+                year: 2020,
+                month: 1,
+                day: 1
+            }
+        );
+        assert_eq!(
+            civil_from_days(18_628),
+            Date {
+                year: 2021,
+                month: 1,
+                day: 1
+            }
+        );
+        assert_eq!(
+            civil_from_days(19_723),
+            Date {
+                year: 2024,
+                month: 1,
+                day: 1
+            }
+        );
+        assert_eq!(
+            civil_from_days(20_089),
+            Date {
+                year: 2025,
+                month: 1,
+                day: 1
+            }
+        );
+        assert_eq!(
+            civil_from_days(20_454),
+            Date {
+                year: 2026,
+                month: 1,
+                day: 1
+            }
+        );
     }
 
     #[test]
     fn a_leap_day_exists_only_in_leap_years() {
-        // 2024-02-29 = 19723 + 31 + 29 = day 19783.
+        // Day numbers cross-checked against .NET's own date arithmetic, not against
+        // this file's formula: an anchor computed by the code under test proves nothing.
+        // 2024-02-29 = 19723 (Jan 1) + 31 + 28 = 19782.
         assert_eq!(
-            civil_from_days(19_783),
-            Date { year: 2024, month: 2, day: 29 },
+            civil_from_days(19_782),
+            Date {
+                year: 2024,
+                month: 2,
+                day: 29
+            },
             "2024 is a leap year"
         );
-        // 2023-03-01 = 19358 + 59 = 19417 → March 1, so Feb had 28 days.
+        // 2023-03-01 = 19417: the day right after Feb 28, so Feb had 28 days.
         assert_eq!(
             civil_from_days(19_417),
-            Date { year: 2023, month: 3, day: 1 },
+            Date {
+                year: 2023,
+                month: 3,
+                day: 1
+            },
             "2023 is not"
+        );
+        // The century rules, where hand-written date code dies: 2000 was a leap year
+        // (÷400), 1900 and 2100 were not (÷100 without ÷400).
+        assert_eq!(
+            civil_from_days(11_016),
+            Date {
+                year: 2000,
+                month: 2,
+                day: 29
+            },
+            "2000 is a leap year: divisible by 400"
+        );
+        assert_eq!(
+            civil_from_days(-25_508),
+            Date {
+                year: 1900,
+                month: 3,
+                day: 1
+            },
+            "1900 is not: divisible by 100"
+        );
+        assert_eq!(
+            civil_from_days(47_541),
+            Date {
+                year: 2100,
+                month: 3,
+                day: 1
+            },
+            "2100 is not: divisible by 100"
         );
     }
 
@@ -154,31 +242,67 @@ mod tests {
         // 2026-10-27: 20454 (Jan 1) + 273 days to Oct 1 + 26 = 20753.
         assert_eq!(
             civil_from_days(20_753),
-            Date { year: 2026, month: 10, day: 27 },
+            Date {
+                year: 2026,
+                month: 10,
+                day: 27
+            },
             "the date this probe is being written on"
         );
     }
 
     #[test]
     fn far_future_and_far_past_do_not_panic() {
-        // Century rules are where hand-written date code dies; these are the anchors
-        // that would catch a missing `doe/36_524` or `doe/146_096` term.
+        // Anchors from .NET's date arithmetic, so a wrong formula cannot agree with a
+        // wrong expectation. 73414 is far past the 2038 `i32` second-overflow boundary,
+        // -134774 is before 1970 by four centuries (the era term must stay exact there).
         assert_eq!(
             civil_from_days(73_414),
-            Date { year: 2071, month: 4, day: 24 },
+            Date {
+                year: 2171,
+                month: 1,
+                day: 1
+            },
             "past 2038"
         );
         assert_eq!(
-            civil_from_days(-719_162),
-            Date { year: 1601, month: 1, day: 1 },
+            civil_from_days(24_855),
+            Date {
+                year: 2038,
+                month: 1,
+                day: 19
+            },
+            "the day an i32 second counter overflows"
+        );
+        assert_eq!(
+            civil_from_days(-134_774),
+            Date {
+                year: 1601,
+                month: 1,
+                day: 1
+            },
             "before 1970 by centuries"
+        );
+        assert_eq!(
+            civil_from_days(-719_162),
+            Date {
+                year: 1,
+                month: 1,
+                day: 1
+            },
+            "the proleptic Gregorian year 1: negative era arithmetic stays exact"
         );
     }
 
     #[test]
     fn the_display_is_iso_padded() {
         assert_eq!(
-            Date { year: 2026, month: 1, day: 7 }.to_string(),
+            Date {
+                year: 2026,
+                month: 1,
+                day: 7
+            }
+            .to_string(),
             "2026-01-07",
             "a date that sorts lexically is a date that sorts"
         );
@@ -187,14 +311,21 @@ mod tests {
     #[test]
     fn utc_today_answers_with_a_sane_date() {
         let d = utc_today().expect("the OS clock has an epoch");
-        assert!(d.year >= 2020, "a clock this wrong is not a measured date: {d}");
+        assert!(
+            d.year >= 2020,
+            "a clock this wrong is not a measured date: {d}"
+        );
         assert!((1..=12).contains(&d.month), "month out of range: {d}");
         assert!((1..=31).contains(&d.day), "day out of range: {d}");
     }
 
     #[test]
     fn the_measured_line_names_the_profile_it_was_built_with() {
-        let line = measured_line(Some(Date { year: 2026, month: 10, day: 27 }));
+        let line = measured_line(Some(Date {
+            year: 2026,
+            month: 10,
+            day: 27,
+        }));
         assert!(
             line.starts_with("measured 2026-10-27, dev machine, "),
             "{line}"
@@ -203,12 +334,23 @@ mod tests {
             line.ends_with("build") && (line.contains("release") || line.contains("debug")),
             "the profile must be the truth of this binary, not a wish: {line}"
         );
-        assert_eq!(profile(), if cfg!(debug_assertions) { "debug" } else { "release" });
+        assert_eq!(
+            profile(),
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
+        );
     }
 
     #[test]
     fn a_missing_date_is_printed_as_unknown_not_guessed() {
-        assert!(measured_line(None).contains("measured unknown"), "{}", measured_line(None));
+        assert!(
+            measured_line(None).contains("measured unknown"),
+            "{}",
+            measured_line(None)
+        );
         let block = measured_block(None);
         assert_eq!(block.len(), 2, "the line plus its footnote");
         assert!(block[1].contains("refused to answer"), "{}", block[1]);

@@ -32,17 +32,16 @@
 //! measurement.
 
 use std::process::ExitCode;
-use std::sync::Mutex;
 
 use cpal::traits::DeviceTrait;
-use hathor_dsp_core::alloc_guard::{self, CheckedAllocator};
+use hathor_dsp_core::alloc_guard::CheckedAllocator;
 
 use crate::probe_error::ProbeError;
 
 mod bench;
 mod cli;
-mod counters;
 mod cost_summary;
+mod counters;
 mod device_plan;
 mod fft_window;
 mod interleave;
@@ -67,8 +66,9 @@ static GUARD: CheckedAllocator = CheckedAllocator::new();
 /// Repo pattern: `LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)`.
 #[cfg(test)]
 pub(crate) fn guard_serial() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn main() -> ExitCode {
@@ -150,10 +150,9 @@ fn dispatch(argv: &[String]) -> Result<(), ProbeError> {
             if r.passed() {
                 return Ok(());
             }
-            Err(ProbeError::Gate(format!(
-                "{}",
-                live_stream::verdict_summary(&r.checks())
-            )))
+            // The verdict summary already names itself ("verdict: … → FAIL"), so it is
+            // the message; wrapping it in another prefix would only duplicate it.
+            Err(ProbeError::Gate(live_stream::verdict_summary(&r.checks())))
         }
         cli::Command::Offline(o) => {
             let r = offline_run::execute(&o)?;
@@ -176,18 +175,21 @@ fn dispatch(argv: &[String]) -> Result<(), ProbeError> {
 mod tests {
     use super::*;
 
+    /// `cli::argv()` strips the program name before `main` calls `dispatch`, so a test
+    /// of `dispatch` must not include it. Getting this backwards is how a CLI test can
+    /// pass while the real binary fails, hence the helper instead of hand-built vectors.
+    fn cmd(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_string()).collect()
+    }
+
     /// The refusal is the whole point of the gate: no device, no sound, and the reason
     /// printed. Tested by calling `dispatch`, which is the only path `main` has.
     #[test]
     fn run_without_consent_refuses_and_names_the_lead_session() {
-        let argv: Vec<String> = ["hathor-audio-probe", "run"]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
         // `dispatch` prints; the assertion is that it returns Ok (a refusal is not an
         // error) without ever reaching cpal. If it had, this test would need a device.
         assert!(
-            dispatch(&argv).is_ok(),
+            dispatch(&cmd(&["run"])).is_ok(),
             "a refusal must exit 0: the command worked, it was simply not authorised"
         );
     }
@@ -195,29 +197,32 @@ mod tests {
     #[test]
     fn help_and_version_are_parseable_and_never_touch_a_device() {
         for flag in ["--help", "-h", "help", "--version"] {
-            let argv = vec!["hathor-audio-probe".to_string(), flag.to_string()];
-            assert!(dispatch(&argv).is_ok(), "{flag}");
+            assert!(dispatch(&cmd(&[flag])).is_ok(), "{flag}");
         }
     }
 
     #[test]
     fn a_bad_command_line_is_a_usage_error_not_a_panic() {
-        let argv = vec![
-            "hathor-audio-probe".to_string(),
-            "run".to_string(),
-            "--frames".to_string(),
-            "0".to_string(),
-        ];
-        let e = dispatch(&argv).err().expect("refused");
+        // Built with `cmd`, not with a program name: with argv[0] present this would
+        // pass for the wrong reason (an unknown *command*, not an out-of-range flag).
+        let e = dispatch(&cmd(&["run", "--frames", "0"])).expect_err("refused");
         assert_eq!(e.tag(), "usage", "{e}");
+        assert!(
+            e.to_string().contains("--frames"),
+            "the message must name the flag that was wrong: {e}"
+        );
     }
 
     #[test]
     fn the_guard_is_installed_and_reads_zero_when_nothing_ran() {
         let _s = guard_serial();
-        alloc_guard::set_panic_on_audio_alloc(false);
-        alloc_guard::reset_counters();
-        assert_eq!(alloc_guard::allocs_total(), 0, "the binary's own instrument");
-        assert!(!alloc_guard::in_audio_section());
+        hathor_dsp_core::alloc_guard::set_panic_on_audio_alloc(false);
+        hathor_dsp_core::alloc_guard::reset_counters();
+        assert_eq!(
+            hathor_dsp_core::alloc_guard::allocs_total(),
+            0,
+            "the binary's own instrument"
+        );
+        assert!(!hathor_dsp_core::alloc_guard::in_audio_section());
     }
 }

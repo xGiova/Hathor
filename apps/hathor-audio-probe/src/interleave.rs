@@ -64,7 +64,9 @@ mod tests {
 
     #[test]
     fn deinterleave_is_the_exact_inverse() {
-        let interleaved = [0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2];
+        let interleaved = [
+            0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2,
+        ];
         let mut planar = [0.0f32; 12];
         // 3 channels × 4 frames.
         deinterleave(&interleaved, &mut planar, 3, 4);

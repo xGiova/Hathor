@@ -38,15 +38,11 @@ pub struct BlockCostRing {
 }
 
 impl BlockCostRing {
-    /// Builds the pair at [`DEFAULT_CAPACITY`].
+    /// Builds the pair with an explicit capacity. `Pump::setup` passes
+    /// [`DEFAULT_CAPACITY`]; the tests use tiny rings to reach the drop path.
     ///
     /// LEGAL ALLOCATION: setup thread — `RingBuffer::new` is the ring's one and only
     /// reservation, and it happens before the stream exists.
-    pub fn pair(counters: Arc<Counters>) -> (Self, Consumer<u64>) {
-        Self::with_capacity(DEFAULT_CAPACITY, counters)
-    }
-
-    /// Builds the pair with an explicit capacity (the tests use tiny rings).
     pub fn with_capacity(capacity: usize, counters: Arc<Counters>) -> (Self, Consumer<u64>) {
         let (producer, consumer) = RingBuffer::new(capacity.max(1));
         (Self { producer, counters }, consumer)
@@ -58,12 +54,6 @@ impl BlockCostRing {
         if self.producer.push(cost_ns).is_err() {
             self.counters.note_ring_drop();
         }
-    }
-
-    /// Free slots as last seen by the producer (a cached read: for diagnostics only,
-    /// never for a decision inside the callback).
-    pub fn free_slots(&self) -> usize {
-        self.producer.slots()
     }
 
     /// The ring's declared capacity.
@@ -98,11 +88,6 @@ impl TimingDrain {
         self.samples.len() - before
     }
 
-    /// The samples collected so far.
-    pub fn samples(&self) -> &[u64] {
-        &self.samples
-    }
-
     /// Number of samples held.
     pub fn len(&self) -> usize {
         self.samples.len()
@@ -132,7 +117,12 @@ mod tests {
         }
         let mut drain = TimingDrain::new(consumer, 8);
         assert_eq!(drain.drain(), 3, "three samples moved");
-        assert_eq!(drain.samples(), &[10, 20, 30], "FIFO, nothing reordered");
+        assert_eq!(
+            drain.into_samples(),
+            vec![10, 20, 30],
+            "FIFO, nothing reordered"
+        );
+
         assert_eq!(c.view().ring_drops, 0, "a ring with room loses nothing");
     }
 
@@ -152,7 +142,11 @@ mod tests {
             6,
             "every refused sample is one counted drop, not a silent loss"
         );
-        assert_eq!(drain.samples(), &[0, 1, 2, 3], "the oldest four survive");
+        assert_eq!(
+            drain.into_samples(),
+            vec![0, 1, 2, 3],
+            "the oldest four survive"
+        );
     }
 
     #[test]
@@ -192,7 +186,7 @@ mod tests {
             ring.publish(round + 100);
             drain.drain();
         }
-        let s = drain.samples();
+        let s = drain.into_samples();
         assert_eq!(s.len(), 40, "no loss when the consumer keeps up");
         assert_eq!(c.view().ring_drops, 0);
         assert_eq!(s[0], 0);

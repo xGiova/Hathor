@@ -73,7 +73,10 @@ impl CostSummary {
         samples.sort_unstable();
         let warn = warn_ns(budget_ns);
         let sum: u64 = samples.iter().sum();
-        let over_warn = samples.iter().filter(|s| **s > warn && **s <= budget_ns).count();
+        let over_warn = samples
+            .iter()
+            .filter(|s| **s > warn && **s <= budget_ns)
+            .count();
         let over_budget = samples.iter().filter(|s| **s > budget_ns).count();
         Self {
             samples: samples.len(),
@@ -144,7 +147,9 @@ mod tests {
 
     #[test]
     fn a_zero_rate_device_does_not_divide_by_zero() {
-        assert_eq!(budget_ns(64, 0), 64_000_000_000 / 1, "clamped, not a panic");
+        // A zero rate would divide by zero; the clamp makes it 64 s per block, which is
+        // "absurdly over budget" rather than a panic in the middle of a measured run.
+        assert_eq!(budget_ns(64, 0), 64_000_000_000, "clamped, not a panic");
     }
 
     #[test]
@@ -160,7 +165,11 @@ mod tests {
         assert_eq!(percentile(&v, 0.50), 50.0, "median of 1..=100 → rank 50");
         assert_eq!(percentile(&v, 0.99), 99.0, "nearest rank, not 99.01");
         assert_eq!(percentile(&v, 1.0), 100.0, "p100 is the maximum");
-        assert_eq!(percentile(&[], 0.99), 0.0, "empty is a real state, not a panic");
+        assert_eq!(
+            percentile(&[], 0.99),
+            0.0,
+            "empty is a real state, not a panic"
+        );
     }
 
     #[test]
@@ -171,7 +180,10 @@ mod tests {
         assert_eq!(c.samples, 6);
         assert_eq!(c.max_ns, 1_500);
         assert_eq!(c.median_ns, 300.0, "rank 3 of the sorted six");
-        assert_eq!(c.mean_ns, (100 + 200 + 300 + 450 + 900 + 1_500) as f64 / 6.0);
+        assert_eq!(
+            c.mean_ns,
+            (100 + 200 + 300 + 450 + 900 + 1_500) as f64 / 6.0
+        );
         assert_eq!(c.over_warn, 2, "450 and 900 are between 400 and 1000");
         assert_eq!(c.over_budget, 1, "only 1500");
         assert!(
@@ -197,7 +209,11 @@ mod tests {
         let c = CostSummary::from_samples(&mut s, 1_000);
         assert_eq!(c.over_warn, 0);
         assert_eq!(c.over_budget, 2);
-        assert_eq!(c.over_warn + c.over_budget, 2, "each sample counted at most once");
+        assert_eq!(
+            c.over_warn + c.over_budget,
+            2,
+            "each sample counted at most once"
+        );
     }
 
     #[test]

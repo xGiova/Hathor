@@ -72,14 +72,14 @@ use cpal::{
 use hathor_dsp_core::alloc_guard;
 
 use crate::cli::{RunOptions, Tone};
-use crate::counters::{Counters, CountersView};
 use crate::cost_summary::{budget_ns, CostSummary};
+use crate::counters::{Counters, CountersView};
 use crate::device_plan::{
     plan_output, BufferLimit, BufferRequest, ConfigInfo, DevicePlan, FrameDecision, PlanError,
     RateDecision, StreamFormat, Wants,
 };
 use crate::probe_error::ProbeError;
-use crate::pump::Pump;
+use crate::pump::{self, Pump};
 use crate::run_report::{self, Check, Measured, Severity};
 use crate::stamp;
 use crate::timing_ring::TimingDrain;
@@ -121,10 +121,22 @@ pub struct PumpFacts {
     pub actual_tone_hz: f32,
     /// The frequency asked for.
     pub asked_tone_hz: f32,
+    /// The integer table step behind the quantised frequency.
+    pub tone_step: usize,
     /// Whether the generator was silence.
     pub tone_silent: bool,
     /// Timing ring capacity in samples.
     pub ring_capacity: usize,
+    /// Frames per chunk, as the pump was sized (from [`Pump::shape`]).
+    pub chunk_frames: u32,
+    /// Channels, as the pump was sized.
+    pub channels: usize,
+    /// Sample rate the chain was built for.
+    pub rate: u32,
+    /// The chain's group delay in samples, printed so a phase reader can subtract it.
+    pub chain_latency: usize,
+    /// The 0.40× warn threshold in ns, measured against the pump's own budget.
+    pub warn_ns: u64,
 }
 
 impl RunResult {
@@ -164,22 +176,27 @@ impl RunResult {
         let checks = self.checks();
         let mut out = plan_report(&self.device_name, &self.plan, &self.options);
         out.push(format!(
-            "pump: {} node(s) [{}], chunk {} frames, budget {:.2} µs/chunk, analysis {} frames, ring {} samples",
+            "pump: {} node(s) [{}], shape {} frames × {} ch @ {} Hz, chain latency {} samples, budget {:.2} µs/chunk (warn {:.2}), analysis {} frames, ring {} samples",
             self.facts.node_names.len(),
             self.facts.node_names.join(" → "),
-            self.plan.chunk_frames,
+            self.facts.chunk_frames,
+            self.facts.channels,
+            self.facts.rate,
+            self.facts.chain_latency,
             self.budget_ns() as f64 / 1e3,
+            self.facts.warn_ns as f64 / 1e3,
             FFT_FRAMES,
             self.facts.ring_capacity,
         ));
         out.push(format!(
-            "tone: {} (asked {} Hz), amplitude 0.2 (−14 dBFS)",
+            "tone: {} (asked {} Hz, table step {}), amplitude 0.2 (−14 dBFS)",
             if self.facts.tone_silent {
-                "silence".to_string()
+                "digital silence".to_string()
             } else {
                 format!("{:.4} Hz", self.facts.actual_tone_hz)
             },
             self.facts.asked_tone_hz,
+            self.facts.tone_step,
         ));
         if let Some(e) = self.node_error {
             out.push(format!("FAIL node refused the block: {e}"));
@@ -188,8 +205,10 @@ impl RunResult {
         out.push(format!("cost: {}", self.cost));
         out.push(format!("  cost unit: {}", CostSummary::label()));
         out.push(format!(
-            "guard: callback total {}, process-wide total {} (measure mode: a violation is counted, never unwound through a driver callback)",
-            self.view.allocs_sum, self.guard_total
+            "guard: callback total {}, process-wide total {}, last closed section {} (measure mode: a violation is counted, never unwound through a driver callback)",
+            self.view.allocs_sum,
+            self.guard_total,
+            pump::last_section_allocs(),
         ));
         out.push(format!(
             "duration: {:.1} s asked, {:.3} s real",
@@ -265,7 +284,10 @@ fn to_info(r: &SupportedStreamConfigRange) -> ConfigInfo {
         min_rate: r.min_sample_rate().0,
         max_rate: r.max_sample_rate().0,
         buffer: match r.buffer_size() {
-            SupportedBufferSize::Range { min, max } => BufferLimit::Range { min: *min, max: *max },
+            SupportedBufferSize::Range { min, max } => BufferLimit::Range {
+                min: *min,
+                max: *max,
+            },
             SupportedBufferSize::Unknown => BufferLimit::Unknown,
         },
         format: match r.sample_format() {
@@ -290,13 +312,15 @@ pub fn stream_config(plan: &DevicePlan) -> StreamConfig {
     }
 }
 
-/// Case-insensitive substring match over device names, so `--device speakers` finds
-/// "Speakers (Realtek(R) Audio)" and a name that matches nothing is an error rather
-/// than a silent fall back to the default.
+/// The one matching rule `--device` uses: case-insensitive substring. Kept separate
+/// from the device walk because cpal's iterator is consumed as it goes, and a search
+/// over a one-element slice would be a silly way to say it.
+///
+/// An empty needle matches *nothing*, not everything: `--device ""` is a typo, and a
+/// typo must not quietly open the first output on the machine.
 #[must_use]
-pub fn find_device(names: &[String], needle: &str) -> Option<usize> {
-    let n = needle.to_lowercase();
-    names.iter().position(|d| d.to_lowercase().contains(&n))
+pub fn name_matches(name: &str, needle: &str) -> bool {
+    !needle.is_empty() && name.to_lowercase().contains(&needle.to_lowercase())
 }
 
 /// Picks the device: the default output, or the first whose name contains `wanted`.
@@ -304,36 +328,26 @@ pub fn find_device(names: &[String], needle: &str) -> Option<usize> {
 /// # Errors
 /// [`ProbeError::Device`] when there is no default output or no name matches.
 pub fn select_device(host: &Host, wanted: Option<&str>) -> Result<Device, ProbeError> {
-    match wanted {
-        None => host
+    let Some(sub) = wanted else {
+        return host
             .default_output_device()
-            .ok_or_else(|| ProbeError::Device("this host has no default output device".into())),
-        Some(sub) => {
-            let devices = host
-                .output_devices()
-                .map_err(|e| ProbeError::Device(format!("output_devices: {e}")))?;
-            // One pass, name and device together: cpal's iterator is consumed as it
-            // goes, and matching by index across two passes would be a lie about
-            // ordering.
-            let mut found: Option<(String, Device)> = None;
-            for d in devices {
-                let name = d
-                    .name()
-                    .unwrap_or_else(|e| format!("<name failed: {e}>"));
-                if found.is_none() && find_device(std::slice::from_ref(&name), sub).is_some() {
-                    found = Some((name, d));
-                }
-            }
-            found.map(|(name, d)| (d, name)).map_or_else(
-                || {
-                    Err(ProbeError::Device(format!(
-                        "no output device name contains {sub:?} (run `devices` for the list)"
-                    )))
-                },
-                |(d, _)| Ok(d),
-            )
+            .ok_or_else(|| ProbeError::Device("this host has no default output device".into()));
+    };
+    let devices = host
+        .output_devices()
+        .map_err(|e| ProbeError::Device(format!("output_devices: {e}")))?;
+    // One pass over cpal's iterator, returning the device as soon as its name matches:
+    // the iterator is consumed as it goes, so collecting names and then indexing back
+    // would be a second source of ordering truth that can disagree with the first.
+    for d in devices {
+        let name = d.name().unwrap_or_else(|e| format!("<name failed: {e}>"));
+        if name_matches(&name, sub) {
+            return Ok(d);
         }
     }
+    Err(ProbeError::Device(format!(
+        "no output device name contains {sub:?} (run `devices` for the list)"
+    )))
 }
 
 /// The configs a device reports, in probe vocabulary.
@@ -392,11 +406,7 @@ pub fn plan_report(device_name: &str, plan: &DevicePlan, o: &RunOptions) -> Vec<
     ];
     let rate = match plan.rate_decision {
         RateDecision::Exact { asked } => format!("{asked} Hz (as asked)"),
-        RateDecision::Clamped {
-            asked,
-            got,
-            range,
-        } => format!(
+        RateDecision::Clamped { asked, got, range } => format!(
             "{got} Hz (asked {asked}, device range {}..={})",
             range.0, range.1
         ),
@@ -409,17 +419,13 @@ pub fn plan_report(device_name: &str, plan: &DevicePlan, o: &RunOptions) -> Vec<
                 BufferLimit::Unknown => "no range".to_string(),
             }
         ),
-        FrameDecision::Clamped {
-            asked,
-            got,
-            range,
-        } => format!(
+        FrameDecision::Clamped { asked, got, range } => format!(
             "{got} frames requested (asked {asked}, device range {}..={})",
             range.0, range.1
         ),
-        FrameDecision::EngineDefault { asked } => format!(
-            "device default requested (no range reported); DSP chunk stays {asked} frames"
-        ),
+        FrameDecision::EngineDefault { asked } => {
+            format!("device default requested (no range reported); DSP chunk stays {asked} frames")
+        }
     };
     v.push(format!(
         "config: #{} {}, {rate}, {buffer}",
@@ -504,8 +510,14 @@ pub fn windows_extras_lines() -> Vec<String> {
 /// `FAIL` that scrolled off the console.
 #[must_use]
 pub fn verdict_summary(checks: &[Check]) -> String {
-    let fails = checks.iter().filter(|c| c.severity == Severity::Fail).count();
-    let warns = checks.iter().filter(|c| c.severity == Severity::Warn).count();
+    let fails = checks
+        .iter()
+        .filter(|c| c.severity == Severity::Fail)
+        .count();
+    let warns = checks
+        .iter()
+        .filter(|c| c.severity == Severity::Warn)
+        .count();
     format!(
         "verdict: {} FAIL, {} warn of {} checks → {}",
         fails,
@@ -521,7 +533,12 @@ pub fn verdict_summary(checks: &[Check]) -> String {
 /// Device/stream/setup failures as [`ProbeError`]. A *measured* violation (an
 /// allocation, an over-budget block) is not an error here: it is a failed check in the
 /// report, so the numbers still get printed. Only the absence of data aborts.
-pub fn execute(o: &RunOptions, plan: DevicePlan, device: Device, name: String) -> Result<RunResult, ProbeError> {
+pub fn execute(
+    o: &RunOptions,
+    plan: DevicePlan,
+    device: Device,
+    name: String,
+) -> Result<RunResult, ProbeError> {
     if plan.format == StreamFormat::Unsupported {
         return Err(ProbeError::Device(format!(
             "the chosen config is {}; this build's callback is typed for f32 and the \
@@ -529,13 +546,27 @@ pub fn execute(o: &RunOptions, plan: DevicePlan, device: Device, name: String) -
             plan.format.label()
         )));
     }
-    let (mut pump, consumer) = Pump::setup(plan.rate, plan.channels, plan.chunk_frames, FFT_FRAMES, o.tone)?;
+    let (mut pump, consumer) = Pump::setup(
+        plan.rate,
+        plan.channels,
+        plan.chunk_frames,
+        FFT_FRAMES,
+        o.tone,
+    )?;
+    // Everything the report needs from the pump, read here: after `build_output_stream`
+    // the pump lives on the driver thread and is unreachable from this one.
     let facts = PumpFacts {
         node_names: pump.chain_names(),
         actual_tone_hz: pump.actual_tone_hz(),
         asked_tone_hz: pump.asked_tone_hz(),
+        tone_step: pump.tone_step(),
         tone_silent: pump.tone_is_silent(),
         ring_capacity: pump.ring_capacity(),
+        chunk_frames: pump.shape().frames as u32,
+        channels: pump.channels(),
+        rate: pump.rate(),
+        chain_latency: pump.chain_latency(),
+        warn_ns: pump.warn_ns(),
     };
     let counters: Arc<Counters> = pump.counters();
     let config = stream_config(&plan);
@@ -547,14 +578,14 @@ pub fn execute(o: &RunOptions, plan: DevicePlan, device: Device, name: String) -
 
     let cb_counters: Arc<Counters> = Arc::clone(&counters);
     let err_counters: Arc<Counters> = Arc::clone(&counters);
-    let mut stream = device
+    let stream = device
         .build_output_stream::<f32, _, _>(
             &config,
             move |data: &mut [f32], _info| {
                 // The stop flag first: after `request_stop` the driver still must get
                 // *something*, and silence is the cheapest legal answer.
                 if cb_counters.stopped() {
-                    crate::pump::fill_silence(data);
+                    pump.render_stopped(data);
                     return;
                 }
                 // Errors are counted, not carried: `render` has already done its own
@@ -630,6 +661,47 @@ pub fn execute(o: &RunOptions, plan: DevicePlan, device: Device, name: String) -
 mod tests {
     use super::*;
 
+    /// A fully populated set of pump facts for the stereo 64-frame run the tests
+    /// describe. The real ones come from the pump before it moves to the driver
+    /// thread; these are the numbers that run would have produced on this machine.
+    fn facts() -> PumpFacts {
+        PumpFacts {
+            node_names: vec![
+                "LowPass".to_string(),
+                "Peak".to_string(),
+                "HighPass".to_string(),
+            ],
+            actual_tone_hz: 445.3125,
+            asked_tone_hz: 440.0,
+            tone_step: 38,
+            tone_silent: false,
+            ring_capacity: 16_384,
+            chunk_frames: 64,
+            channels: 2,
+            rate: 48_000,
+            chain_latency: 8,
+            warn_ns: 533_333,
+        }
+    }
+
+    /// The same facts for a run with silence as the source and no chain — a report has
+    /// to be printable for the case where nothing was ever audible.
+    fn silent_facts() -> PumpFacts {
+        PumpFacts {
+            node_names: Vec::new(),
+            actual_tone_hz: 0.0,
+            asked_tone_hz: 0.0,
+            tone_step: 0,
+            tone_silent: true,
+            ring_capacity: 0,
+            chunk_frames: 64,
+            channels: 2,
+            rate: 48_000,
+            chain_latency: 0,
+            warn_ns: 533_333,
+        }
+    }
+
     fn wasapi_48k() -> ConfigInfo {
         ConfigInfo {
             channels: 2,
@@ -645,17 +717,24 @@ mod tests {
 
     #[test]
     fn device_matching_is_case_insensitive_substring() {
-        let names = vec![
-            "Speakers (Realtek(R) Audio)".to_string(),
-            "LG HDR HD (NVIDIA High Definition Audio)".to_string(),
+        let names = [
+            "Speakers (Realtek(R) Audio)",
+            "LG HDR HD (NVIDIA High Definition Audio)",
         ];
-        assert_eq!(find_device(&names, "speakers"), Some(0));
-        assert_eq!(find_device(&names, "REALTEK"), Some(0));
-        assert_eq!(find_device(&names, "nvidia"), Some(1));
+        // The same `first match wins` walk `select_device` does over cpal's iterator,
+        // driven by the shared predicate rather than a copy of its logic.
+        let first = |needle: &str| names.iter().position(|n| name_matches(n, needle));
+        assert_eq!(first("speakers"), Some(0));
+        assert_eq!(first("REALTEK"), Some(0));
+        assert_eq!(first("nvidia"), Some(1));
         assert_eq!(
-            find_device(&names, "focusrite"),
+            first("focusrite"),
             None,
             "a name that matches nothing must not silently open the default"
+        );
+        assert!(
+            !name_matches("Speakers (Realtek(R) Audio)", ""),
+            "an empty --device is refused by the parser, and must not match everything here"
         );
     }
 
@@ -666,7 +745,14 @@ mod tests {
             max_rate: 44_100,
             ..wasapi_48k()
         };
-        let plan = decide(&[info], &Wants { rate: 48_000, frames: 64 }).expect("plan");
+        let plan = decide(
+            &[info],
+            &Wants {
+                rate: 48_000,
+                frames: 64,
+            },
+        )
+        .expect("plan");
         let o = RunOptions::default();
         let lines = plan_report("Speakers", &plan, &o).join("\n");
         assert!(lines.contains("device: Speakers"), "{lines}");
@@ -674,12 +760,16 @@ mod tests {
             lines.contains("44100 Hz (asked 48000"),
             "the clamp must be visible, not smoothed over: {lines}"
         );
-        assert!(lines.contains("asking: 48000 Hz, 64 frame block"), "{lines}");
+        assert!(
+            lines.contains("asking: 48000 Hz, 64 frame block"),
+            "{lines}"
+        );
     }
 
     #[test]
     fn a_clamped_driver_buffer_still_promises_the_dsp_chunk() {
         let info = ConfigInfo {
+            channels: 2,
             min_rate: 48_000,
             max_rate: 48_000,
             buffer: BufferLimit::Range {
@@ -688,9 +778,19 @@ mod tests {
             },
             format: StreamFormat::F32,
         };
-        let plan = decide(&[info], &Wants { rate: 48_000, frames: 64 }).expect("plan");
+        let plan = decide(
+            &[info],
+            &Wants {
+                rate: 48_000,
+                frames: 64,
+            },
+        )
+        .expect("plan");
         let lines = plan_report("X", &plan, &RunOptions::default()).join("\n");
-        assert!(lines.contains("11520 frames requested (asked 64"), "{lines}");
+        assert!(
+            lines.contains("11520 frames requested (asked 64"),
+            "{lines}"
+        );
         assert!(
             lines.contains("DSP pumps 64-frame blocks regardless"),
             "the sentence the whole chunking design exists to be able to say: {lines}"
@@ -703,14 +803,28 @@ mod tests {
             channels: 1,
             min_rate: 48_000,
             max_rate: 48_000,
-            buffer: BufferLimit::Range { min: 256, max: 1_024 },
+            buffer: BufferLimit::Range {
+                min: 256,
+                max: 1_024,
+            },
             format: StreamFormat::F32,
         };
-        let plan = decide(&[info], &Wants { rate: 48_000, frames: 64 }).expect("plan");
+        let plan = decide(
+            &[info],
+            &Wants {
+                rate: 48_000,
+                frames: 64,
+            },
+        )
+        .expect("plan");
         let cfg = stream_config(&plan);
         assert_eq!(cfg.channels, 1);
         assert_eq!(cfg.sample_rate, SampleRate(48_000));
-        assert_eq!(cfg.buffer_size, BufferSize::Fixed(256), "the device's minimum");
+        assert_eq!(
+            cfg.buffer_size,
+            BufferSize::Fixed(256),
+            "the device's minimum"
+        );
         assert_eq!(plan.chunk_frames, 64, "and the DSP still pumps 64");
     }
 
@@ -720,7 +834,14 @@ mod tests {
             buffer: BufferLimit::Unknown,
             ..wasapi_48k()
         };
-        let plan = decide(&[info], &Wants { rate: 48_000, frames: 64 }).expect("plan");
+        let plan = decide(
+            &[info],
+            &Wants {
+                rate: 48_000,
+                frames: 64,
+            },
+        )
+        .expect("plan");
         assert_eq!(stream_config(&plan).buffer_size, BufferSize::Default);
     }
 
@@ -730,10 +851,22 @@ mod tests {
             format: StreamFormat::Unsupported,
             ..wasapi_48k()
         };
-        let e = decide(&[info], &Wants { rate: 48_000, frames: 64 }).err().expect("refused");
+        let e = decide(
+            &[info],
+            &Wants {
+                rate: 48_000,
+                frames: 64,
+            },
+        )
+        .expect_err("refused");
         let s = e.to_string();
         assert_eq!(e.tag(), "device");
-        assert!(s.contains("2ch 44100..192000Hz f32"), "configs listed: {s}");
+        // The config is named as it was *reported* — including that its format was
+        // neither f32 nor i16 — so the refusal is about a real device, not a guess.
+        assert!(
+            s.contains("2ch 44100..192000Hz unsupported"),
+            "configs listed: {s}"
+        );
     }
 
     #[test]
@@ -747,19 +880,28 @@ mod tests {
         c.note_fft(true);
         c.note_energy(9.0);
         let ls = observed_lines(&c.view(), 64).join("\n");
-        assert!(ls.contains("1 callback(s), 8 chunk(s) of ≤64 frames"), "{ls}");
+        assert!(
+            ls.contains("1 callback(s), 8 chunk(s) of ≤64 frames"),
+            "{ls}"
+        );
         assert!(ls.contains("480..=480 frames delivered"), "{ls}");
         assert!(ls.contains("Σ|X|² 9.0"), "{ls}");
         assert!(ls.contains("FTZ/DAZ OFF"), "{ls}");
         assert!(ls.contains("xrun proxy"), "{ls}");
         let none = observed_lines(&Counters::new().view(), 64).join("\n");
-        assert!(none.contains("none..=0 frames"), "no callback ever ran: {none}");
+        assert!(
+            none.contains("none..=0 frames"),
+            "no callback ever ran: {none}"
+        );
     }
 
     #[test]
     fn the_windows_extras_are_listed_with_their_reasons() {
         let ls = windows_extras_lines();
-        assert!(ls.len() >= 4, "priority, timer, MMCSS, exclusive mode: {ls:?}");
+        assert!(
+            ls.len() >= 4,
+            "priority, timer, MMCSS, exclusive mode: {ls:?}"
+        );
         assert!(ls.iter().any(|l| l.contains("SetPriorityClass")), "{ls:?}");
         assert!(ls.iter().any(|l| l.contains("timeBeginPeriod")), "{ls:?}");
         assert!(ls.iter().any(|l| l.contains("Pro Audio")), "{ls:?}");
@@ -773,9 +915,21 @@ mod tests {
     #[test]
     fn verdict_summary_counts_by_severity_and_cannot_hide_a_fail() {
         let checks = vec![
-            Check { name: "a", detail: String::new(), severity: Severity::Pass },
-            Check { name: "b", detail: String::new(), severity: Severity::Warn },
-            Check { name: "c", detail: String::new(), severity: Severity::Fail },
+            Check {
+                name: "a",
+                detail: String::new(),
+                severity: Severity::Pass,
+            },
+            Check {
+                name: "b",
+                detail: String::new(),
+                severity: Severity::Warn,
+            },
+            Check {
+                name: "c",
+                detail: String::new(),
+                severity: Severity::Fail,
+            },
         ];
         assert_eq!(
             verdict_summary(&checks),
@@ -797,7 +951,14 @@ mod tests {
 
     #[test]
     fn a_budget_of_the_pumped_shape_is_the_core_constant() {
-        let plan = decide(&[wasapi_48k()], &Wants { rate: 48_000, frames: 64 }).expect("plan");
+        let plan = decide(
+            &[wasapi_48k()],
+            &Wants {
+                rate: 48_000,
+                frames: 64,
+            },
+        )
+        .expect("plan");
         let r = RunResult {
             options: RunOptions::default(),
             device_name: "X".to_string(),
@@ -807,18 +968,15 @@ mod tests {
             guard_total: 0,
             real_seconds: 0.0,
             node_error: None,
-            facts: PumpFacts {
-                node_names: vec!["a".to_string()],
-                actual_tone_hz: 445.3125,
-                asked_tone_hz: 440.0,
-                tone_silent: false,
-                ring_capacity: 16_384,
-            },
+            facts: facts(),
         };
         assert_eq!(r.budget_ns(), 1_333_333);
         assert!(!r.passed(), "a run that measured nothing cannot pass");
         let lines = r.lines();
-        assert!(lines.iter().any(|l| l.contains("tone: 445.3125 Hz")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("tone: 445.3125 Hz")),
+            "{lines:?}"
+        );
         assert!(
             lines.iter().any(|l| l.contains("verdict:")),
             "the summary line must be there: {lines:?}"
@@ -827,7 +985,14 @@ mod tests {
 
     #[test]
     fn a_node_error_appears_in_the_report_as_a_fail() {
-        let plan = decide(&[wasapi_48k()], &Wants { rate: 48_000, frames: 64 }).expect("plan");
+        let plan = decide(
+            &[wasapi_48k()],
+            &Wants {
+                rate: 48_000,
+                frames: 64,
+            },
+        )
+        .expect("plan");
         let r = RunResult {
             options: RunOptions::default(),
             device_name: "X".to_string(),
@@ -837,13 +1002,7 @@ mod tests {
             guard_total: 0,
             real_seconds: 1.0,
             node_error: Some("block exceeds the chain's declared shape"),
-            facts: PumpFacts {
-                node_names: Vec::new(),
-                actual_tone_hz: 0.0,
-                asked_tone_hz: 0.0,
-                tone_silent: true,
-                ring_capacity: 0,
-            },
+            facts: silent_facts(),
         };
         let lines = r.lines().join("\n");
         assert!(lines.contains("FAIL node refused the block"), "{lines}");

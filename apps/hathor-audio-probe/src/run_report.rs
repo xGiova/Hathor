@@ -23,8 +23,8 @@
 //!
 //! There is no "N/A": a number the probe could not take is a Warn with the reason.
 
-use crate::counters::CountersView;
-use crate::cost_summary::{CostSummary, warn_ns};
+use crate::cost_summary::{warn_ns, CostSummary};
+use crate::counters::{Counters, CountersView};
 
 /// How a check reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,9 +110,10 @@ pub fn evaluate(m: &Measured<'_>) -> Vec<Check> {
              — WASAPI shared mode exposes no xrun counter, so these are the proxy",
             v.stream_errors, v.cost_over_budget, v.cost_over_warn
         ),
-        severity: if m.stream_errored || v.stream_errors > 0 {
-            Severity::Fail
-        } else if v.cost_over_budget > 0 {
+        // One condition, both reasons: a driver error and a chunk that overran the
+        // whole budget are the same verdict here, and writing them as separate arms
+        // only hides that they do the same thing.
+        severity: if m.stream_errored || v.stream_errors > 0 || v.cost_over_budget > 0 {
             Severity::Fail
         } else {
             Severity::Pass
@@ -126,7 +127,11 @@ pub fn evaluate(m: &Measured<'_>) -> Vec<Check> {
         } else {
             "every chunk was accepted".to_string()
         },
-        severity: if m.node_refused { Severity::Fail } else { Severity::Pass },
+        severity: if m.node_refused {
+            Severity::Fail
+        } else {
+            Severity::Pass
+        },
     });
 
     c.push(Check {
@@ -153,19 +158,22 @@ pub fn evaluate(m: &Measured<'_>) -> Vec<Check> {
     c.push(Check {
         name: "worst chunk cost against 0.40× budget",
         detail: format!(
-            "max {:.2} µs of {:.2} µs budget ({}), p99 {:.2} µs, mean {:.2} µs — \
-             {} chunk(s) over 0.40×, {} over 1.00×",
+            "max {:.2} µs of {:.2} µs budget ({}), p99 {:.2} µs, mean {:.2} µs — worst is \
+             {:.3}× budget; {} chunk(s) over 0.40×, {} over 1.00×",
             m.cost.max_ns as f64 / 1e3,
             m.budget_ns as f64 / 1e3,
             CostSummary::label(),
             m.cost.p99_ns / 1e3,
             m.cost.mean_ns / 1e3,
+            // The ratio criterion 4 is stated in, computed from the same numbers the
+            // verdict uses rather than restated by hand: 1.0 means a full budget.
+            m.cost.worst_ratio(),
             m.cost.over_warn,
             m.cost.over_budget,
         ),
-        severity: if m.cost.samples == 0 {
-            Severity::Fail
-        } else if m.cost.max_ns > warn_ns(m.budget_ns) {
+        severity: if m.cost.samples == 0 || m.cost.max_ns > warn_ns(m.budget_ns) {
+            // Two ways this row fails: nothing crossed the ring (so there is no
+            // evidence at all), or the worst chunk broke the 0.40× criterion.
             Severity::Fail
         } else {
             Severity::Pass
@@ -176,13 +184,11 @@ pub fn evaluate(m: &Measured<'_>) -> Vec<Check> {
         name: "cost samples",
         detail: format!(
             "{} sample(s) of {} published through the ring; {} lost to a full ring",
-            m.cost.samples,
-            v.chunks,
-            v.ring_drops,
+            m.cost.samples, v.chunks, v.ring_drops,
         ),
-        severity: if v.ring_drops > 0 {
-            Severity::Warn
-        } else if m.cost.samples == 0 {
+        severity: if v.ring_drops > 0 || m.cost.samples == 0 {
+            // Lost samples and no samples at all are the same problem: the summary
+            // below is not built from the whole run.
             Severity::Warn
         } else {
             Severity::Pass
@@ -225,9 +231,11 @@ pub fn evaluate(m: &Measured<'_>) -> Vec<Check> {
         ),
         severity: if v.chunks == 0 {
             Severity::Fail
-        } else if peak.is_none() {
-            Severity::Warn
-        } else if peak.unwrap_or(f32::NEG_INFINITY) > 0.0 {
+        } else if !peak.is_some_and(|p| p <= 0.0) {
+            // Either no level was ever recorded, or something peaked above full
+            // scale. Both mean this row cannot be offered as evidence the chain was
+            // audible — a missing reading is not a silent one, and a clipped one is
+            // not a clean one.
             Severity::Warn
         } else {
             Severity::Pass
@@ -261,7 +269,11 @@ pub fn evaluate(m: &Measured<'_>) -> Vec<Check> {
         } else {
             "FTZ/DAZ NOT installed: block cost may include denormal punishment".to_string()
         },
-        severity: if v.ftz_set { Severity::Pass } else { Severity::Warn },
+        severity: if v.ftz_set {
+            Severity::Pass
+        } else {
+            Severity::Warn
+        },
     });
 
     c
@@ -278,20 +290,17 @@ fn fmt_min(min: u32) -> String {
 
 /// `None` is "never measured", which is not the same as 0 dBFS.
 fn fmt_db(db: Option<f32>) -> String {
-    db.map_or_else(
-        || "−inf (nothing heard)".to_string(),
-        |d| format!("{d:.1}"),
-    )
+    db.map_or_else(|| "−inf (nothing heard)".to_string(), |d| format!("{d:.1}"))
 }
 
 impl CountersView {
     /// The peak/rms fields as real options: `NEG_INFINITY` is *silence*, `NaN` is a
-    /// broken measurement, and the report must not conflate them.
+    /// broken measurement, and the report must not conflate them. The decode itself
+    /// lives in [`crate::counters::Counters::from_bits`] — one place says what the
+    /// bits mean, here we only decide what to do about silence.
     pub fn from_bits_opt(bits: u32) -> Option<f32> {
-        let v = f32::from_bits(bits);
-        if v.is_nan() {
-            None
-        } else if v == f32::NEG_INFINITY {
+        let v = Counters::from_bits(bits);
+        if v.is_nan() || v == f32::NEG_INFINITY {
             None
         } else {
             Some(v)
@@ -300,12 +309,8 @@ impl CountersView {
 
     /// The energy field as an option: non-finite means a bin went non-finite.
     pub fn energy_from_bits_opt(bits: u64) -> Option<f64> {
-        let v = f64::from_bits(bits);
-        if v.is_finite() {
-            Some(v)
-        } else {
-            None
-        }
+        let v = Counters::energy_from_bits(bits);
+        v.is_finite().then_some(v)
     }
 }
 
@@ -391,7 +396,10 @@ mod tests {
         cost.samples = 0;
         let checks = evaluate(&measured(&v, &cost));
         assert!(!passed(&checks), "empty counters are not a pass");
-        assert!(checks.iter().any(|c| c.name == "driver callback sizes vs the requested block" && c.severity == Severity::Fail));
+        assert!(checks
+            .iter()
+            .any(|c| c.name == "driver callback sizes vs the requested block"
+                && c.severity == Severity::Fail));
     }
 
     #[test]
@@ -408,7 +416,10 @@ mod tests {
             "analysis ran on the scratch door",
             "denormals",
         ] {
-            let c = checks.iter().find(|c| c.name == name).unwrap_or_else(|| panic!("missing check {name}"));
+            let c = checks
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("missing check {name}"));
             assert_eq!(c.severity, Severity::Pass, "{name}: {}", c.detail);
         }
         assert!(passed(&checks));
@@ -438,7 +449,8 @@ mod tests {
         // The pump saw nothing but the allocator counted one: e.g. a buffer grown by
         // a node we do not own. Either reading failing is enough.
         let v = clean();
-        let mut m = measured(&v, &cost());
+        let sample_cost = cost();
+        let mut m = measured(&v, &sample_cost);
         m.guard_allocs = 1;
         assert!(!passed(&evaluate(&m)));
     }
@@ -451,7 +463,10 @@ mod tests {
         c.note_stream_error();
         let v = c.view();
         let checks = evaluate(&measured(&v, &cost()));
-        let x = checks.iter().find(|c| c.name.contains("xrun proxy")).expect("check");
+        let x = checks
+            .iter()
+            .find(|c| c.name.contains("xrun proxy"))
+            .expect("check");
         assert_eq!(x.severity, Severity::Fail, "{}", x.detail);
     }
 
@@ -464,8 +479,16 @@ mod tests {
         }
         let v = c.view();
         let checks = evaluate(&measured(&v, &cost()));
-        let x = checks.iter().find(|c| c.name.contains("xrun proxy")).expect("check");
-        assert_eq!(x.severity, Severity::Fail, "over-budget chunks: {}", x.detail);
+        let x = checks
+            .iter()
+            .find(|c| c.name.contains("xrun proxy"))
+            .expect("check");
+        assert_eq!(
+            x.severity,
+            Severity::Fail,
+            "over-budget chunks: {}",
+            x.detail
+        );
         assert!(x.detail.contains("3 chunk(s) over budget"), "{}", x.detail);
     }
 
@@ -484,7 +507,11 @@ mod tests {
             .find(|c| c.name.starts_with("driver callback sizes"))
             .expect("check");
         assert_eq!(size.severity, Severity::Warn, "{}", size.detail);
-        assert!(size.detail.contains("callbacks delivered 480..=480 frames"), "{}", size.detail);
+        assert!(
+            size.detail.contains("callbacks delivered 480..=480 frames"),
+            "{}",
+            size.detail
+        );
         assert!(
             passed(&checks),
             "a warn is the machine's answer, not a broken contract: {size:?}"
@@ -512,7 +539,10 @@ mod tests {
         c.note_ring_drop();
         let v = c.view();
         let checks = evaluate(&measured(&v, &cost()));
-        let s = checks.iter().find(|c| c.name == "cost samples").expect("check");
+        let s = checks
+            .iter()
+            .find(|c| c.name == "cost samples")
+            .expect("check");
         assert_eq!(s.severity, Severity::Warn, "{}", s.detail);
     }
 
@@ -547,9 +577,16 @@ mod tests {
         c.note_energy(5.0);
         let v = c.view();
         let checks = evaluate(&measured(&v, &cost()));
-        let lvl = checks.iter().find(|c| c.name == "output level").expect("check");
+        let lvl = checks
+            .iter()
+            .find(|c| c.name == "output level")
+            .expect("check");
         assert_eq!(lvl.severity, Severity::Warn, "{}", lvl.detail);
-        assert!(lvl.detail.contains("−inf (nothing heard)"), "{}", lvl.detail);
+        assert!(
+            lvl.detail.contains("−inf (nothing heard)"),
+            "{}",
+            lvl.detail
+        );
     }
 
     #[test]
@@ -623,7 +660,10 @@ mod tests {
         c.note_energy(1.0);
         let v = c.view();
         let checks = evaluate(&measured(&v, &cost()));
-        let ftz = checks.iter().find(|c| c.name == "denormals").expect("check");
+        let ftz = checks
+            .iter()
+            .find(|c| c.name == "denormals")
+            .expect("check");
         assert_eq!(ftz.severity, Severity::Warn);
         assert!(ftz.detail.contains("NOT installed"), "{}", ftz.detail);
     }
@@ -639,24 +679,41 @@ mod tests {
         let v = clean();
         let ls = lines(&evaluate(&measured(&v, &cost())));
         assert!(ls.len() >= 9, "one line per check: {}", ls.len());
-        assert!(ls.iter().all(|l| l.starts_with("ok") || l.starts_with("warn") || l.starts_with("FAIL")), "{ls:?}");
-        assert!(ls.iter().any(|l| l.contains("allocations observed")), "{ls:?}");
+        assert!(
+            ls.iter()
+                .all(|l| l.starts_with("ok") || l.starts_with("warn") || l.starts_with("FAIL")),
+            "{ls:?}"
+        );
+        assert!(
+            ls.iter().any(|l| l.contains("allocations observed")),
+            "{ls:?}"
+        );
     }
 
     #[test]
     fn an_unasked_for_node_refusal_fails() {
         let v = clean();
-        let mut m = measured(&v, &cost());
+        let sample_cost = cost();
+        let mut m = measured(&v, &sample_cost);
         m.node_refused = true;
         assert!(!passed(&evaluate(&m)));
     }
 
     #[test]
     fn silence_and_broken_measurements_are_distinguishable_in_the_helpers() {
-        assert_eq!(CountersView::from_bits_opt(f32::NEG_INFINITY.to_bits()), None);
+        assert_eq!(
+            CountersView::from_bits_opt(f32::NEG_INFINITY.to_bits()),
+            None
+        );
         assert_eq!(CountersView::from_bits_opt(f32::NAN.to_bits()), None);
         assert_eq!(CountersView::from_bits_opt((-6.0f32).to_bits()), Some(-6.0));
-        assert_eq!(CountersView::energy_from_bits_opt(f64::INFINITY.to_bits()), None);
-        assert_eq!(CountersView::energy_from_bits_opt(1.0f64.to_bits()), Some(1.0));
+        assert_eq!(
+            CountersView::energy_from_bits_opt(f64::INFINITY.to_bits()),
+            None
+        );
+        assert_eq!(
+            CountersView::energy_from_bits_opt(1.0f64.to_bits()),
+            Some(1.0)
+        );
     }
 }

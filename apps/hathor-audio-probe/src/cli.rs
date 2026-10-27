@@ -270,8 +270,12 @@ where
             "--frames" => o.frames = num(next_value(it, name)?, FRAMES_MIN, FRAMES_MAX, name)?,
             "--rate" => o.rate = num(next_value(it, name)?, RATE_MIN, RATE_MAX, name)?,
             "--cycles" => {
-                o.cycles = num(next_value(it, name)?, CYCLES_MIN as u32, CYCLES_MAX as u32, name)?
-                    as usize;
+                o.cycles = num(
+                    next_value(it, name)?,
+                    CYCLES_MIN as u32,
+                    CYCLES_MAX as u32,
+                    name,
+                )? as usize;
             }
             "--fft-size" => {
                 let n = num(
@@ -321,7 +325,9 @@ where
     I: Iterator<Item = &'a String>,
 {
     it.next().map(String::as_str).ok_or_else(|| {
-        CliError(format!("{name} expects a value (see `hathor-audio-probe help`)"))
+        CliError(format!(
+            "{name} expects a value (see `hathor-audio-probe help`)"
+        ))
     })
 }
 
@@ -359,7 +365,9 @@ fn num(raw: &str, min: u32, max: u32, name: &str) -> Result<u32, CliError> {
 
 fn float(raw: &str, min: f64, max: f64, name: &str) -> Result<f64, CliError> {
     let v: f64 = raw.parse().map_err(|_| {
-        CliError(format!("{name} expects a number, got {raw:?} (range {min}..={max})"))
+        CliError(format!(
+            "{name} expects a number, got {raw:?} (range {min}..={max})"
+        ))
     })?;
     if !v.is_finite() || v < min || v > max {
         return Err(CliError(format!(
@@ -373,11 +381,9 @@ fn tone(raw: &str) -> Result<Tone, CliError> {
     if raw.eq_ignore_ascii_case("silence") {
         return Ok(Tone::Silence);
     }
-    let hz: f32 = raw.parse().map_err(|_| {
-        CliError(format!(
-            "--tone expects Hz or `silence`, got {raw:?}"
-        ))
-    })?;
+    let hz: f32 = raw
+        .parse()
+        .map_err(|_| CliError(format!("--tone expects Hz or `silence`, got {raw:?}")))?;
     if !hz.is_finite() || hz <= 0.0 || hz >= 20_000.0 {
         return Err(CliError(format!(
             "--tone out of range: {hz} Hz must be in (0, 20000)"
@@ -471,15 +477,15 @@ mod tests {
 
     #[test]
     fn unknown_command_and_unknown_flag_are_errors() {
-        let e = parse(&args(&["devcies"])).err().expect("typo rejected");
+        let e = parse(&args(&["devcies"])).expect_err("typo rejected");
         assert!(e.0.contains("unknown command"), "{e}");
-        let e = parse(&args(&["bench", "--frames", "64"])).err().expect("wrong scope");
+        let e = parse(&args(&["bench", "--frames", "64"])).expect_err("wrong scope");
         assert!(e.0.contains("unknown flag"), "{e}");
     }
 
     #[test]
     fn missing_value_names_the_flag() {
-        let e = parse(&args(&["run", "--frames"])).err().expect("dangling flag");
+        let e = parse(&args(&["run", "--frames"])).expect_err("dangling flag");
         assert!(e.0.contains("--frames"), "{e}");
     }
 
@@ -487,7 +493,7 @@ mod tests {
     fn equals_form_is_rejected_not_half_parsed() {
         // `--frames=64` would otherwise be read as a positional and accepted:
         // strictness here is what keeps a typo from becoming a measured number.
-        let e = parse(&args(&["offline", "--frames=64"])).err().expect("equals form");
+        let e = parse(&args(&["offline", "--frames=64"])).expect_err("equals form");
         assert!(e.0.contains("space separated"), "{e}");
     }
 
@@ -500,26 +506,22 @@ mod tests {
             (args(&["run", "--seconds", "0.1"]), "--seconds out of range"),
             (args(&["run", "--tone", "0"]), "--tone out of range"),
             (args(&["offline", "--cycles", "0"]), "--cycles out of range"),
-            (
-                args(&["offline", "--fft-size", "1000"]),
-                "power of two",
-            ),
+            (args(&["offline", "--fft-size", "1000"]), "power of two"),
             (
                 args(&["bench", "--iterations", "64"]),
                 "--iterations out of range",
             ),
         ] {
-            let owned: Vec<&str> = argv.iter().map(String::as_str).collect();
-            let e = parse(&owned).err().unwrap_or_else(|| panic!("reject {owned:?}"));
-            assert!(e.0.contains(needle), "{owned:?} gave {e}");
+            // `expect_err` panics with the command line that unexpectedly parsed, so
+            // the failure message still says which case broke.
+            let e = parse(&argv).expect_err("every value here is out of range");
+            assert!(e.0.contains(needle), "{argv:?} gave {e}");
         }
     }
 
     #[test]
     fn non_numeric_values_are_rejected() {
-        let e = parse(&args(&["run", "--frames", "sixtyfour"]))
-            .err()
-            .expect("not a number");
+        let e = parse(&args(&["run", "--frames", "sixtyfour"])).expect_err("not a number");
         assert!(e.0.contains("integer"), "{e}");
     }
 

@@ -194,8 +194,10 @@ impl DevicePlan {
                  shared mode WASAPI keeps its own engine period, so the printed \
                  callback sizes — not this request — are what actually arrived"
             }
-            _ => "the requested buffer is inside the reported range; the printed \
-                  callback sizes still decide whether the driver honoured it",
+            _ => {
+                "the requested buffer is inside the reported range; the printed \
+                  callback sizes still decide whether the driver honoured it"
+            }
         }
     }
 }
@@ -214,7 +216,11 @@ impl fmt::Display for PlanError {
         match self {
             Self::NoConfigs => write!(f, "the device reported no output configurations"),
             Self::NoUsableFormat(seen) => {
-                write!(f, "no f32/i16 output config among the {} reported (", seen.len())?;
+                write!(
+                    f,
+                    "no f32/i16 output config among the {} reported (",
+                    seen.len()
+                )?;
                 for (i, s) in seen.iter().enumerate() {
                     write!(f, "{}{}", if i > 0 { ", " } else { "" }, s.label())?;
                 }
@@ -226,18 +232,22 @@ impl fmt::Display for PlanError {
 
 impl std::error::Error for PlanError {}
 
+/// Ranking key, smaller-is-better in every position: format rank, rate rank, channel
+/// rank, distance from the requested rate, then the index in cpal's own report order.
+/// The last component is what makes ties deterministic.
+type Ranked<'a> = ((u8, u8, u8, u32, usize), &'a ConfigInfo);
+
 /// Picks the config to open, the rate to open it at and the buffer to request.
 ///
 /// Ranking (best first): usable format (`f32` before `i16`), a range that contains
 /// the requested rate, stereo before mono before widest, then the smallest distance
 /// to the requested rate. Ties break by input order, which is cpal's own heuristic
 /// order — so the choice is reproducible, and `plan_is_stable_under_ties` pins it.
-#[must_use]
 pub fn plan_output(configs: &[ConfigInfo], wants: &Wants) -> Result<DevicePlan, PlanError> {
     if configs.is_empty() {
         return Err(PlanError::NoConfigs);
     }
-    let mut best: Option<((u8, u8, u8, u32, usize), &ConfigInfo)> = None;
+    let mut best: Option<Ranked<'_>> = None;
     for (i, cfg) in configs.iter().enumerate() {
         let Some(fmt_rank) = cfg.format.rank() else {
             continue;
@@ -399,7 +409,9 @@ mod tests {
             ..wasapi_f32(48_000, 48_000, FREE)
         }];
         assert_eq!(
-            plan_output(&mono, &wants(48_000, 64)).expect("mono plan").channels,
+            plan_output(&mono, &wants(48_000, 64))
+                .expect("mono plan")
+                .channels,
             1,
             "a mono endpoint is still a real device"
         );
@@ -440,7 +452,10 @@ mod tests {
         let cfgs = [wasapi_f32(
             48_000,
             48_000,
-            BufferLimit::Range { min: 128, max: 4096 },
+            BufferLimit::Range {
+                min: 128,
+                max: 4096,
+            },
         )];
         let p = plan_output(&cfgs, &wants(48_000, 64)).expect("plan");
         assert_eq!(
@@ -523,9 +538,9 @@ mod tests {
                 format: StreamFormat::Unsupported,
             },
         ];
-        let e = plan_output(&cfgs, &wants(48_000, 64)).err().expect("refused");
+        let e = plan_output(&cfgs, &wants(48_000, 64)).expect_err("refused");
         match e {
-            PlanError::NoUsableFormat(seen) => assert_eq!(seen.len(), 2, "both refused"),
+            PlanError::NoUsableFormat(ref seen) => assert_eq!(seen.len(), 2, "both refused"),
             other => panic!("wrong rejection: {other:?}"),
         }
         assert!(e.to_string().contains("unsupported"), "{e}");
@@ -568,6 +583,10 @@ mod tests {
             format: StreamFormat::I16,
         }];
         let p = plan_output(&cfgs, &wants(48_000, 64)).expect("plan");
-        assert_eq!(p.format, StreamFormat::I16, "an i16 endpoint is still hardware");
+        assert_eq!(
+            p.format,
+            StreamFormat::I16,
+            "an i16 endpoint is still hardware"
+        );
     }
 }

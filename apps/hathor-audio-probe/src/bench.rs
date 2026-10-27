@@ -53,10 +53,10 @@ use hathor_host_graph::Chain;
 
 use crate::cli::{BenchOptions, Tone};
 use crate::cost_summary::BUDGET_64_48K_NS;
-use crate::pump::{Pump, CHAIN_SPEC};
 use crate::fft_window::FftWindow;
 use crate::interleave::{deinterleave, interleave};
 use crate::probe_error::ProbeError;
+use crate::pump::{Pump, CHAIN_SPEC};
 use crate::stamp;
 use crate::tone::ToneGen;
 
@@ -67,6 +67,11 @@ pub const TARGET_SAMPLE_NS: u64 = 200_000;
 
 /// Reps run before timing starts, and discarded.
 pub const WARMUP_REPS: usize = 16;
+
+/// Reps timed to estimate one rep's cost, before the real batches are sized. Has to be
+/// more than one: the cheapest kernel here is ~30 ns and the clock's quantum is
+/// comparable, so a single-rep estimate reads 0 and the batch sizing falls apart.
+pub const CALIB_REPS: usize = 64;
 
 /// The largest batch we are willing to build for one sample. A kernel measured at
 /// 1 ns would otherwise ask for 200,000 reps; that is a minute of a machine's life
@@ -129,18 +134,25 @@ impl Row {
         let budget = if self.against_budget {
             format!("{:>8.2}%", self.budget_pct())
         } else {
-            "       -".to_string()
+            // Nine wide, exactly like the formatted percentage above: a column that
+            // changes width depending on its row is a column a reader cannot follow.
+            "        -".to_string()
         };
         format!(
-            "{:<58} {:>20} {:>19} {} {:>6}  {}",
+            "{:<58} {:>20} {:>19}  {} {:>6}  {}",
             self.name, per, spread, budget, self.allocs, self.note
         )
     }
 
     /// The header above [`Row::line`].
+    ///
+    /// `min…max` is labelled **per batch** because that is what is timed: a batch is
+    /// `calibrate()` reps of the kernel, sized from one cold estimate, so its length
+    /// varies from process to process while the per-unit column does not. Leaving the
+    /// column unlabelled would let a reader mistake a 3 ms batch for a 3 ms kernel.
     #[must_use]
     pub const fn header() -> &'static str {
-        "row                                                     per-unit          min…max ns  %budget allocs  note"
+        "row                                                                    per-unit    min…max ns/batch    %budget allocs  note"
     }
 
     /// How many reps fit in one sample: `target / one rep`, clamped to
@@ -179,9 +191,14 @@ fn measure(
     for _ in 0..WARMUP_REPS {
         f(1);
     }
+    // Calibrate on a batch, not on one rep. A single rep of a fast kernel (the tone
+    // table fill is ~30 ns) is *below the clock's quantum*: `elapsed()` returns 0,
+    // `calibrate` then hands out the maximum batch, and the timed samples become 3–5 ms
+    // monsters instead of the ≳200 µs the method line describes. 64 reps is measurable
+    // even for the cheapest row here, and costs one discarded sample.
     let t = Instant::now();
-    f(1);
-    let one_rep_ns = t.elapsed().as_nanos() as u64;
+    f(CALIB_REPS);
+    let one_rep_ns = t.elapsed().as_nanos() as u64 / CALIB_REPS as u64;
     let inner = Row::calibrate(one_rep_ns, TARGET_SAMPLE_NS);
 
     // LEGAL ALLOCATION: control thread, outside every section — the sample stamps.
@@ -224,8 +241,17 @@ pub fn rows(o: &BenchOptions) -> Result<Vec<Row>, ProbeError> {
     let mut rows: Vec<Row> = Vec::new();
 
     // ── 1. scalar mono biquad, in place, at the G1 block size ────────────────────
-    let coeffs = design(FilterKind::Peak { q: 1.0, gain_db: 6.0 }, 3_000.0, 48_000.0)
-        .map_err(|e| ProbeError::Stream(format!("coeffs::design refused the bench filter: {e:?}")))?;
+    // The coefficients are the chain's own middle filter (Peak 1 kHz, +6 dB), so this
+    // row and the "chain" row at the bottom are costs of the same arithmetic.
+    let coeffs = design(
+        FilterKind::Peak {
+            q: 1.0,
+            gain_db: 6.0,
+        },
+        1_000.0,
+        48_000.0,
+    )
+    .map_err(|e| ProbeError::Stream(format!("coeffs::design refused the bench filter: {e:?}")))?;
     let mut mono: Vec<f32> = ramp(64);
     {
         let mut bq = Biquad::new(coeffs);
@@ -335,7 +361,7 @@ pub fn rows(o: &BenchOptions) -> Result<Vec<Row>, ProbeError> {
 
     // ── 4. element-wise, auto-vectorised (the baseline a hand-written loop is
     //    compared against) ────────────────────────────────────────────────────────
-    let mut src: Vec<f32> = ramp(64);
+    let src: Vec<f32> = ramp(64);
     let mut dst: Vec<f32> = vec![0.0; 64];
     let mut acc: f32 = 0.0;
     let mut run = |reps: usize| {
@@ -379,7 +405,7 @@ pub fn rows(o: &BenchOptions) -> Result<Vec<Row>, ProbeError> {
         }
     };
     rows.push(measure(
-        "chain LP120→Peak3000→HP4000, stereo, 64 frames",
+        "chain LP8k→Peak1k+6→HP100, stereo, 64 frames",
         "frame",
         64,
         false,
@@ -415,11 +441,16 @@ pub fn rows(o: &BenchOptions) -> Result<Vec<Row>, ProbeError> {
         )?);
         // A 37-cycle sine in an N-point window lands in bin 37: the row would be
         // meaningless if the plan were silently not doing the work.
-        assert!(bins[37].norm_sqr() > 1.0, "the {size}-point transform found no tone");
+        assert!(
+            bins[37].norm_sqr() > 1.0,
+            "the {size}-point transform found no tone"
+        );
     }
 
     let mut cplan = FftPlan::new(4_096);
-    let mut cx: Vec<Complex> = (0..4_096).map(|i| Complex::new(i as f32 * 1e-3, 0.0)).collect();
+    let mut cx: Vec<Complex> = (0..4_096)
+        .map(|i| Complex::new(i as f32 * 1e-3, 0.0))
+        .collect();
     let mut run = |reps: usize| {
         for _ in 0..reps {
             cplan.process(&mut cx);
@@ -553,7 +584,10 @@ pub fn rows(o: &BenchOptions) -> Result<Vec<Row>, ProbeError> {
     )?);
     assert_eq!(pump_errs, 0, "the pump refused its own chunk");
     drop(consumer);
-    assert!(ring_capacity > 0, "the bench row's pump had no ring to be configured");
+    assert!(
+        ring_capacity > 0,
+        "the bench row's pump had no ring to be configured"
+    );
 
     Ok(rows)
 }
@@ -564,6 +598,22 @@ pub fn rows(o: &BenchOptions) -> Result<Vec<Row>, ProbeError> {
 /// must appear in the `allocs` column rather than abort a benchmark that is three
 /// rows from being useful. A non-zero count is still an error out of here.
 ///
+/// The closing tally line, as a function so the text can be tested.
+///
+/// This existed as an inline `format!` with `{:.0}%%` in it — a printf habit. Rust
+/// prints `%%` literally, so the report said "100%% of them allocated-free". Nothing
+/// else would have noticed, which is the whole reason it is a named function now.
+fn summary_line(printed: usize, ran: usize, clean: usize, guard_total: u64) -> String {
+    let pct = if ran == 0 {
+        0.0
+    } else {
+        100.0 * clean as f64 / ran as f64
+    };
+    format!(
+        "rows: {printed} printed, {ran} measured ({pct:.0}% of them allocated-free, guard total {guard_total})"
+    )
+}
+
 /// # Errors
 /// Whatever [`rows`] returns, plus [`ProbeError::Gate`] if any row allocated.
 pub fn execute(o: &BenchOptions) -> Result<(), ProbeError> {
@@ -590,16 +640,16 @@ pub fn execute(o: &BenchOptions) -> Result<(), ProbeError> {
         }
     }
     let ran: usize = table.iter().filter(|r| r.samples > 0).count();
+    // `ran - offenders` rather than "rows with allocs == 0": a NOT-RUN placeholder row
+    // has no allocations either, and counting it as clean would overstate the ratio.
     println!(
-        "rows: {} printed, {} measured ({:.0}%% of them allocated-free, guard total {})",
-        table.len(),
-        ran,
-        if ran == 0 {
-            0.0
-        } else {
-            100.0 * table.iter().filter(|r| r.allocs == 0).count() as f64 / ran as f64
-        },
-        alloc_guard::allocs_total(),
+        "{}",
+        summary_line(
+            table.len(),
+            ran,
+            ran - offenders.len(),
+            alloc_guard::allocs_total()
+        )
     );
     println!(
         "budget: {} ns = {:.2} µs per 64-frame block at 48 kHz \
@@ -608,8 +658,13 @@ pub fn execute(o: &BenchOptions) -> Result<(), ProbeError> {
         BUDGET_64_48K_NS as f64 / 1e3,
     );
     println!(
-        "unit: wallclock nanoseconds from std::time::Instant pairs, NOT CPU cycles; median, \
-         with min…max shown because a tail is the whole story of a deadline"
+        "unit: wallclock nanoseconds from std::time::Instant pairs, NOT CPU cycles; the \
+         per-unit column is the median of timed batches divided by their rep count, and \
+         min…max is the batch spread — a tail is the whole story of a deadline"
+    );
+    println!(
+        "note: batch length is calibrated once, cold, per process (≳{TARGET_SAMPLE_NS} ns), \
+         so the min…max column is not comparable between runs while per-unit is"
     );
     if !offenders.is_empty() {
         return Err(ProbeError::Gate(format!(
@@ -669,13 +724,21 @@ mod tests {
     fn per_unit_divides_by_units_and_by_the_batch_not_by_magic() {
         // 512 samples × 10 reps × 64 frames, median sample 128 000 ns → 200 ns/frame.
         let r = row(64, 10, 128_000.0);
-        assert!((r.ns_per_rep() - 12_800.0).abs() < 1e-6, "{}", r.ns_per_rep());
-        assert!((r.ns_per_unit() - 200.0).abs() < 1e-6, "{}", r.ns_per_unit());
+        assert!(
+            (r.ns_per_rep() - 12_800.0).abs() < 1e-6,
+            "{}",
+            r.ns_per_rep()
+        );
+        assert!(
+            (r.ns_per_unit() - 200.0).abs() < 1e-6,
+            "{}",
+            r.ns_per_unit()
+        );
     }
 
     #[test]
     fn a_chunk_row_reads_against_the_real_budget() {
-        let r = row(1, 1, f64::from(BUDGET_64_48K_NS) / 2.0);
+        let r = row(1, 1, BUDGET_64_48K_NS as f64 / 2.0);
         assert!((r.budget_pct() - 50.0).abs() < 1e-3, "{}", r.budget_pct());
         assert_eq!(BUDGET_64_48K_NS, 1_333_333, "1333.33 µs, truncated");
     }
@@ -683,15 +746,33 @@ mod tests {
     #[test]
     fn calibration_batches_a_fast_kernel_and_caps_a_pathological_one() {
         assert_eq!(Row::calibrate(200, TARGET_SAMPLE_NS), 1_000);
-        assert_eq!(Row::calibrate(1_000_000, TARGET_SAMPLE_NS), 1, "a slow rep is its own batch");
-        assert_eq!(Row::calibrate(0, TARGET_SAMPLE_NS), INNER_MAX, "faster than the clock");
-        assert_eq!(Row::calibrate(1, TARGET_SAMPLE_NS), INNER_MAX, "capped, not 200 000 reps");
+        assert_eq!(
+            Row::calibrate(1_000_000, TARGET_SAMPLE_NS),
+            1,
+            "a slow rep is its own batch"
+        );
+        assert_eq!(
+            Row::calibrate(0, TARGET_SAMPLE_NS),
+            INNER_MAX,
+            "faster than the clock"
+        );
+        assert_eq!(
+            Row::calibrate(1, TARGET_SAMPLE_NS),
+            INNER_MAX,
+            "capped, not 200 000 reps"
+        );
     }
 
     #[test]
     fn the_budget_column_only_appears_for_block_sized_rows() {
-        assert!(row(1, 1, 100.0).line().contains('%'), "a chunk row shows %budget");
-        assert!(row(64, 1, 100.0).line().contains('-'), "a frame row shows a dash");
+        assert!(
+            row(1, 1, 100.0).line().contains('%'),
+            "a chunk row shows %budget"
+        );
+        assert!(
+            row(64, 1, 100.0).line().contains('-'),
+            "a frame row shows a dash"
+        );
     }
 
     #[test]
@@ -703,10 +784,33 @@ mod tests {
     }
 
     #[test]
+    fn the_summary_line_has_one_percent_sign_and_no_printf_artifact() {
+        let all = summary_line(16, 16, 16, 0);
+        assert!(all.contains("(100% of them allocated-free"), "{all}");
+        assert!(
+            !all.contains("%%"),
+            "a printf `%%` is not a percent in Rust: {all}"
+        );
+        assert_eq!(
+            summary_line(3, 2, 1, 7).as_str(),
+            "rows: 3 printed, 2 measured (50% of them allocated-free, guard total 7)"
+        );
+        // A run where nothing could be timed must not divide by zero.
+        assert!(summary_line(1, 0, 0, 0).contains("(0%"), "no rows measured");
+    }
+
+    #[test]
     fn measure_refuses_a_sample_count_under_the_method() {
-        let e = measure("x", "frame", 1, false, "n", crate::cli::ITERATIONS_MIN - 1, &mut |_| {})
-            .err()
-            .expect("refused");
+        let e = measure(
+            "x",
+            "frame",
+            1,
+            false,
+            "n",
+            crate::cli::ITERATIONS_MIN - 1,
+            &mut |_| {},
+        )
+        .expect_err("refused");
         assert_eq!(e.tag(), "usage");
         assert!(e.to_string().contains("at least 512"), "{e}");
     }
@@ -723,7 +827,10 @@ mod tests {
         .expect("measured");
         assert_eq!(r.samples, 512);
         assert!(r.inner >= 1, "the calibration chose {}", r.inner);
-        assert!(r.median_ns >= f64::from(r.min_ns), "median below min is a sorting bug");
+        assert!(
+            r.median_ns >= r.min_ns as f64,
+            "median below min is a sorting bug"
+        );
         assert!(r.max_ns >= r.min_ns);
         assert_eq!(r.allocs, 0, "a loop that only adds does not allocate");
     }
@@ -734,7 +841,11 @@ mod tests {
         // is the test that proves `bench` will not die in front of a human.
         let o = BenchOptions { iterations: 512 };
         let rows = rows(&o).expect("bench rows");
-        assert!(rows.len() >= 11, "expected the criterion rows, got {}", rows.len());
+        assert!(
+            rows.len() >= 11,
+            "expected the criterion rows, got {}",
+            rows.len()
+        );
         assert!(
             rows.iter().all(|r| r.name.len() < 59),
             "a name wider than its column would shift the whole table: {:?}",
@@ -747,8 +858,15 @@ mod tests {
             .iter()
             .find(|r| r.name.starts_with("pump chunk"))
             .expect("the pump row exists");
-        assert!(pump.against_budget, "only the chunk row is judged against a block");
-        assert!(pump.budget_pct() < 100.0, "a chunk must fit its budget: {}%", pump.budget_pct());
+        assert!(
+            pump.against_budget,
+            "only the chunk row is judged against a block"
+        );
+        assert!(
+            pump.budget_pct() < 100.0,
+            "a chunk must fit its budget: {}%",
+            pump.budget_pct()
+        );
     }
 
     #[test]
@@ -764,6 +882,9 @@ mod tests {
         // `bench` is the G1 deliverable: it must be runnable, not just compilable. The
         // assertion is the exit status; the printing is what the report quotes.
         let o = BenchOptions { iterations: 512 };
-        assert!(execute(&o).is_ok(), "a bench row that allocates must fail loudly");
+        assert!(
+            execute(&o).is_ok(),
+            "a bench row that allocates must fail loudly"
+        );
     }
 }

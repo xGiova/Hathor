@@ -44,8 +44,8 @@ use hathor_host_graph::Chain;
 use rtrb::Consumer;
 
 use crate::cli::Tone;
-use crate::counters::Counters;
 use crate::cost_summary::{budget_ns as chunk_budget_ns, warn_ns};
+use crate::counters::Counters;
 use crate::fft_window::FftWindow;
 use crate::interleave::{deinterleave, interleave};
 use crate::probe_error::ProbeError;
@@ -55,17 +55,26 @@ use crate::tone::ToneGen;
 /// The three biquads the probe runs: listenable, cheap, and stateful.
 ///
 /// Fixed, not random: two magnitude filters with Q and one gain filter with a dB
-/// parameter, cascaded. Chosen so a human can *hear* that the chain is alive on a
-/// 440 Hz tone (the 120 Hz low-pass barely touches it, the +6 dB peak at 3 kHz lifts
-/// the harmonics, the 4 kHz high-pass thins it) and so that two runs on different
-/// days are comparable.
+/// parameter, cascaded. Chosen so the 440 Hz tone actually gets through — a first
+/// draft had LP 120 Hz → Peak 3 kHz → HP 4 kHz, and a unit test caught that the low
+/// and high passes have *no* overlapping passband there: the probe would have played
+/// a −59 dBFS whisper and the level check would have been meaningless. With LP 8 kHz
+/// and HP 100 Hz both skirts are far from 445 Hz (a 2nd-order Butterworth is
+/// 1/√(1+(f/fc)⁴), so each costs well under 0.01 dB), and the +6 dB peak at 1 kHz
+/// lands on the tone's low shoulder. Two runs on different days stay comparable
+/// because none of this depends on the device.
 pub const CHAIN_SPEC: [(FilterKind, f32, f32, f32); 3] = [
-    (FilterKind::LowPass { q: 0.707 }, 120.0, 0.707, 0.0),
-    (FilterKind::Peak {
-        q: 1.0,
-        gain_db: 6.0,
-    }, 3_000.0, 1.0, 6.0),
-    (FilterKind::HighPass { q: 0.707 }, 4_000.0, 0.707, 0.0),
+    (FilterKind::LowPass { q: 0.707 }, 8_000.0, 0.707, 0.0),
+    (
+        FilterKind::Peak {
+            q: 1.0,
+            gain_db: 6.0,
+        },
+        1_000.0,
+        1.0,
+        6.0,
+    ),
+    (FilterKind::HighPass { q: 0.707 }, 100.0, 0.707, 0.0),
 ];
 
 /// `Chain` is `!Send`: its nodes are `Box<dyn Node>` and `dyn Node` is neither
@@ -110,11 +119,6 @@ impl OwnedChain {
     /// The only mutable view: taken by the callback for one chunk at a time.
     pub fn chain_mut(&mut self) -> &mut Chain {
         &mut self.inner
-    }
-
-    /// Unwraps the chain (control-thread teardown).
-    pub fn into_inner(self) -> Chain {
-        self.inner
     }
 }
 
@@ -187,7 +191,14 @@ impl Pump {
         fft_size: usize,
         tone: Tone,
     ) -> Result<(Self, Consumer<u64>), ProbeError> {
-        Self::setup_with_ring(rate, channels, chunk_frames, fft_size, tone, DEFAULT_CAPACITY)
+        Self::setup_with_ring(
+            rate,
+            channels,
+            chunk_frames,
+            fft_size,
+            tone,
+            DEFAULT_CAPACITY,
+        )
     }
 
     /// [`Pump::setup`] with an explicit ring capacity (the tests use small rings).
@@ -437,6 +448,32 @@ impl Pump {
         fill_silence(out);
     }
 
+    /// The table step behind [`Pump::actual_tone_hz`]: printed with it, so the
+    /// quantisation ("440 Hz became 445.3125 Hz") is checkable from the report alone.
+    pub fn tone_step(&self) -> usize {
+        self.core.tone.step()
+    }
+
+    /// Frames currently in the FFT window. In `offline` this is read after the loop and
+    /// proves the analysis window reached full size; in `run` the pump is on the driver
+    /// thread by then, which is why the live report reads the transform counters instead.
+    pub fn window_filled(&self) -> usize {
+        self.core.window.filled()
+    }
+
+    /// The window's declared size, in frames.
+    pub fn window_size(&self) -> usize {
+        self.core.window.size()
+    }
+
+    /// Cold-starts the analysis window. `offline` calls this before its loop so the
+    /// first cycle's "window still filling" state is a fact of the run, not an
+    /// accident of construction; it costs one memset and happens outside the measured
+    /// region.
+    pub fn reset_analysis_window(&mut self) {
+        self.core.window.reset();
+    }
+
     /// The same chunk of work **without the instruments**, for [`crate::bench`]: no
     /// `AudioSection` (the bench owns the section — nesting one here would be refused
     /// by the guard), no counters, no ring push. Those costs are their own rows, and
@@ -603,7 +640,8 @@ mod tests {
     /// deviation the core's guard tests document.
     fn serial_guard() -> MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
-        LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn pump(rate: u32, ch: u16, chunk: u32, fft: usize, tone: Tone) -> (Pump, Consumer<u64>) {
@@ -661,7 +699,10 @@ mod tests {
         assert_eq!(v.callbacks, 100);
         assert_eq!(v.chunks, 100, "one 64-frame callback is one chunk");
         assert_eq!(v.frames, 6_400);
-        assert_eq!(v.allocs_sum, 0, "the contract: zero allocations in the callback");
+        assert_eq!(
+            v.allocs_sum, 0,
+            "the contract: zero allocations in the callback"
+        );
         assert_eq!(v.allocs_max_per_callback, 0);
         assert_eq!(
             alloc_guard::allocs_total(),
@@ -724,16 +765,34 @@ mod tests {
         let v = pump.counters().view();
         drop(pump);
         drop(consumer);
+        // The tone is 0.2 amplitude = −14 dBFS, and the rebuilt chain passes it within
+        // a few dB. A bound this tight is the point: it was a loose −60 dB that let the
+        // original no-overlapping-passband chain look fine for as long as it did.
+        let peak = Counters::from_bits(v.peak_bits);
         assert!(
-            Counters::from_bits(v.peak_bits) > -60.0,
-            "a −60 dB peak from a 0.2-amplitude tone means the chain is silent"
+            peak > -25.0 && peak < -3.0,
+            "peak {peak:.1} dBFS: expected near −14 for a 0.2-amplitude tone through \
+             LP 8k / Peak 1k+6dB / HP 100"
         );
-        assert!(v.fft_runs > 0, "the transform ran at least once: {}", v.fft_runs);
-        assert_eq!(v.fft_runs + v.fft_warm_skips, v.chunks, "every chunk answered");
         assert!(
-            v.fft_warm_skips >= 16,
-            "1024/64 = 16 chunks are spent filling the window"
+            v.fft_runs > 0,
+            "the transform ran at least once: {}",
+            v.fft_runs
         );
+        assert_eq!(
+            v.fft_runs + v.fft_warm_skips,
+            v.chunks,
+            "every chunk answered"
+        );
+        // The pump pushes the chunk *then* asks the window, so the 16th push
+        // (1024/64) is the first that is full: 15 chunks of warm-up, 5 transforms out
+        // of 20. Exact numbers, because "at least some" would pass a pump that only
+        // ever analysed one block in twenty.
+        assert_eq!(
+            v.fft_warm_skips, 15,
+            "1024 frames / 64-frame chunks = 16 pushes to fill the window"
+        );
+        assert_eq!(v.fft_runs, 5, "chunks 16..20 analysed");
         let energy = Counters::energy_from_bits(v.energy_bits);
         assert!(energy > 0.0 && energy.is_finite(), "Σ|X|² = {energy}");
     }
@@ -794,7 +853,10 @@ mod tests {
         let v = pump.counters().view();
         drop(pump);
         drop(consumer);
-        assert_eq!(v.callbacks, 1, "a callback happened, it just had nothing in it");
+        assert_eq!(
+            v.callbacks, 1,
+            "a callback happened, it just had nothing in it"
+        );
         assert_eq!(v.chunks, 0, "no work was invented");
     }
 
@@ -809,9 +871,15 @@ mod tests {
         let moved = drain.drain();
         let v = pump.counters().view();
         drop(pump);
-        assert_eq!(moved, v.chunks, "8 chunks × 5 callbacks, no sample lost");
+        assert_eq!(
+            moved as u64, v.chunks,
+            "8 chunks × 5 callbacks, no sample lost"
+        );
         assert_eq!(v.ring_drops, 0);
-        assert!(drain.samples().iter().all(|s| *s > 0), "all costs are real");
+        assert!(
+            drain.into_samples().iter().all(|s| *s > 0),
+            "all costs are real"
+        );
     }
 
     #[test]
@@ -821,7 +889,11 @@ mod tests {
         let mut out = [3.0f32; 128];
         pump.render_stopped(&mut out);
         assert!(out.iter().all(|s| *s == 0.0));
-        assert_eq!(counters.view().chunks, 0, "the stop path must not invent work");
+        assert_eq!(
+            counters.view().chunks,
+            0,
+            "the stop path must not invent work"
+        );
         assert!(!counters.stopped(), "stopping is the control thread's call");
         counters.request_stop();
         assert!(counters.stopped());
@@ -856,12 +928,15 @@ mod tests {
         let (mut pump, consumer) = pump(48_000, 2, 64, 1_024, Tone::Sine(440.0));
         let outer = AudioSection::enter().expect("outer");
         let mut out = [0.0f32; 128];
-        let e = pump.render(&mut out, false).err().expect("refused");
+        let e = pump.render(&mut out, false).expect_err("refused");
         assert!(
             matches!(e, ProbeError::Stream(_)),
             "a nested section is a stream/usage error: {e}"
         );
-        assert_eq!(out, [0.0f32; 128], "a refused callback must still be silence");
+        assert_eq!(
+            out, [0.0f32; 128],
+            "a refused callback must still be silence"
+        );
         drop(outer);
         let v = pump.counters().view();
         drop(pump);
@@ -875,7 +950,10 @@ mod tests {
         let mut out = [0.0f32; 128];
         pump.render(&mut out, false).expect("render");
         pump.render(&mut out, false).expect("render");
-        assert!(pump.ftz_installed, "the pump remembers it did the CSR write");
+        assert!(
+            pump.ftz_installed,
+            "the pump remembers it did the CSR write"
+        );
         assert!(
             pump.counters().view().ftz_set,
             "and the report can say FTZ/DAZ was on"

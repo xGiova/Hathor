@@ -176,7 +176,8 @@ impl Counters {
     /// chunk shape, passed in by the pump so the counters stay policy-free.
     pub fn note_chunk(&self, cost_ns: u64, chunk_frames: u32, warn_ns: u64, budget_ns: u64) {
         self.chunks.fetch_add(1, Ordering::Relaxed);
-        self.frames.fetch_add(u64::from(chunk_frames), Ordering::Relaxed);
+        self.frames
+            .fetch_add(u64::from(chunk_frames), Ordering::Relaxed);
         self.cost_sum_ns.fetch_add(cost_ns, Ordering::Relaxed);
         self.cost_max_ns.fetch_max(cost_ns, Ordering::Relaxed);
         if cost_ns > budget_ns {
@@ -204,7 +205,11 @@ impl Counters {
 
     /// A transform ran / was skipped because the window was still filling.
     pub fn note_fft(&self, ran: bool) {
-        let c = if ran { &self.fft_runs } else { &self.fft_warm_skips };
+        let c = if ran {
+            &self.fft_runs
+        } else {
+            &self.fft_warm_skips
+        };
         c.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -220,11 +225,13 @@ impl Counters {
         let mut cur = self.peak_bits.load(Ordering::Relaxed);
         loop {
             let candidate = f32::from_bits(cur);
-            // `!(peak_db > candidate)` also rejects a NaN candidate and a NaN reading:
-            // a corrupt level never overwrites a good one, and the corrupt run still
-            // shows up in the block counters.
-            if !(peak_db > candidate) {
-                break;
+            // Only a strictly greater reading may overwrite. Written with `partial_cmp`
+            // so the incomparable case is explicit: `None` — a NaN on either side — is
+            // "do not overwrite", so a corrupt level never replaces a good one, and the
+            // corrupt run still shows up in the block counters.
+            match peak_db.partial_cmp(&candidate) {
+                Some(std::cmp::Ordering::Greater) => {}
+                _ => break,
             }
             match self.peak_bits.compare_exchange_weak(
                 cur,
@@ -319,7 +326,11 @@ mod tests {
             f32::NEG_INFINITY,
             "nothing heard yet: −inf dBFS, not 0 dBFS"
         );
-        assert_eq!(Counters::energy_from_bits(v.energy_bits), 0.0, "no transform ran");
+        assert_eq!(
+            Counters::energy_from_bits(v.energy_bits),
+            0.0,
+            "no transform ran"
+        );
         assert!(!v.ftz_set, "nothing installed FTZ yet");
     }
 
@@ -330,7 +341,10 @@ mod tests {
             c.note_callback(f, 0);
         }
         let v = c.view();
-        assert_eq!(v.cb_frames_min, 1, "the odd 1-frame callback must be visible");
+        assert_eq!(
+            v.cb_frames_min, 1,
+            "the odd 1-frame callback must be visible"
+        );
         assert_eq!(v.cb_frames_max, 480);
         assert_eq!(v.callbacks, 5);
     }
@@ -375,7 +389,11 @@ mod tests {
     fn threshold_boundary_is_not_counted_as_a_violation() {
         let c = Counters::new();
         c.note_chunk(1_000, 64, 400, 1_000);
-        assert_eq!(c.view().cost_over_budget, 0, "exactly at budget is not over it");
+        assert_eq!(
+            c.view().cost_over_budget,
+            0,
+            "exactly at budget is not over it"
+        );
     }
 
     #[test]

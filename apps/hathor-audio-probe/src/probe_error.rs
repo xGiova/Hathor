@@ -74,12 +74,18 @@ mod tests {
             (ProbeError::Usage("a".into()), "usage"),
             (ProbeError::Device("b".into()), "device"),
             (ProbeError::Stream("c".into()), "stream"),
-            (ProbeError::Node("block exceeds the chain's declared shape"), "node"),
+            (
+                ProbeError::Node("block exceeds the chain's declared shape"),
+                "node",
+            ),
             (ProbeError::Gate("allocations != 0".into()), "gate"),
         ];
         for (e, tag) in cases {
             assert_eq!(e.tag(), tag, "{e}");
-            assert!(!e.to_string().is_empty(), "an error that prints nothing helps nobody");
+            assert!(
+                !e.to_string().is_empty(),
+                "an error that prints nothing helps nobody"
+            );
         }
     }
 

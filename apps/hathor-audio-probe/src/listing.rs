@@ -95,7 +95,11 @@ pub fn render(hosts: &[HostSummary], rate: u32, frames: u32) -> Vec<String> {
             out.push("  (no devices enumerated)".to_string());
         }
         for d in &h.devices {
-            let mark = if d.is_default { " [DEFAULT OUTPUT]" } else { "" };
+            let mark = if d.is_default {
+                " [DEFAULT OUTPUT]"
+            } else {
+                ""
+            };
             let kind = if d.is_output { "output" } else { "input-only" };
             out.push(format!("  {} ({}){}", d.name, kind, mark));
             if let Some(n) = &d.note {
@@ -120,8 +124,8 @@ pub fn render(hosts: &[HostSummary], rate: u32, frames: u32) -> Vec<String> {
 /// One config, in the device's own numbers.
 fn render_config(c: &ConfigInfo) -> String {
     let buffer = match c.buffer {
-        BufferLimit::Range { min, max } if c.buffer.is_free_rein() => {
-            format!("buffer 0..=max (free rein: shared mode)")
+        BufferLimit::Range { .. } if c.buffer.is_free_rein() => {
+            "buffer 0..=max (free rein: shared mode)".to_string()
         }
         BufferLimit::Range { min, max } => format!("buffer {min}..={max} frames"),
         BufferLimit::Unknown => "buffer unknown until opened".to_string(),
@@ -153,7 +157,6 @@ fn format_label(f: StreamFormat) -> String {
 /// rather than propagated: a machine where DirectSound is missing but WASAPI works
 /// must still print the devices it has. That is the difference between a probe and a
 /// crash.
-#[must_use]
 pub fn collect() -> Result<Vec<HostSummary>, ProbeError> {
     let host_ids = cpal::available_hosts();
     if host_ids.is_empty() {
@@ -286,7 +289,10 @@ mod tests {
             note: Some("no runtime".to_string()),
         };
         let lines = render(&[h], 48_000, 64);
-        assert!(lines[0].contains("host DirectSound: NOT available"), "{lines:?}");
+        assert!(
+            lines[0].contains("host DirectSound: NOT available"),
+            "{lines:?}"
+        );
         assert!(lines[1].contains("no runtime"), "{lines:?}");
     }
 
@@ -298,7 +304,9 @@ mod tests {
             devices: Vec::new(),
             note: None,
         };
-        assert!(render(&[h], 48_000, 64).iter().any(|l| l.contains("no devices enumerated")));
+        assert!(render(&[h], 48_000, 64)
+            .iter()
+            .any(|l| l.contains("no devices enumerated")));
     }
 
     #[test]
@@ -345,7 +353,9 @@ mod tests {
             64,
         );
         assert!(
-            lines.iter().any(|l| l.contains("reported no output configurations")),
+            lines
+                .iter()
+                .any(|l| l.contains("reported no output configurations")),
             "{lines:?}"
         );
     }
@@ -364,7 +374,10 @@ mod tests {
             48_000,
             64,
         );
-        assert!(lines.iter().any(|l| l.contains("note: device unavailable")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("note: device unavailable")),
+            "{lines:?}"
+        );
     }
 
     #[test]
@@ -377,7 +390,10 @@ mod tests {
             format: StreamFormat::I16,
         };
         let line = render_config(&c);
-        assert!(line.contains("48000 Hz, buffer unknown until opened"), "{line}");
+        assert!(
+            line.contains("48000 Hz, buffer unknown until opened"),
+            "{line}"
+        );
         assert!(line.contains("i16 native"), "{line}");
     }
 
