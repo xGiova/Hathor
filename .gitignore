@@ -1,0 +1,18 @@
+/target
+**/*.rs.bk
+*.pdb
+*.obj
+*.exp
+*.lib
+C:\tmp*
+/flamegraph.svg
+/perf.data
+/bench/*.json
+!bench/expected/*.txt
+/vendor/asio
+/external/ASIOSDK*
+# The ASIO SDK is NOT redistributable: never commit it (user-side download only).
+**/asiosys.h
+**/iasiothiscallresolver.*
+# Diagnostic scratch (probe runs, temp test logs).
+*.log

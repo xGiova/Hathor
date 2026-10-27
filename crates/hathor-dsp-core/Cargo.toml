@@ -1,0 +1,18 @@
+[package]
+name = "hathor-dsp-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Audio engine contracts: planar buffers, Node, parameters, allocation guard."
+
+[dependencies]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+# The clippy unwrap/expect bans live in the crate root under cfg(not(test)):
+# from here, where they would also apply to tests, they cannot be conditioned.
+[lints.clippy]
+panic_in_result_fn = "deny"
+exit = "deny"
+todo = "deny"

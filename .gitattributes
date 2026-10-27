@@ -1,0 +1,3 @@
+# LF is the repo convention (docs state it explicitly). Normalize on commit and
+# keep LF on checkout so the "no CR" machine checks stay true on any clone.
+* text=auto eol=lf

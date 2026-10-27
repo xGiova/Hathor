@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+# Active members. hathor-dsp-fft, hathor-dsp-measure, hathor-host-graph and
+# hathor-audio-probe are waiting for their build session: listing them here does
+# NOT compile until they exist.
+members = [
+    "crates/hathor-dsp-core",
+    "crates/hathor-dsp-filters",
+]
+
+# Planned members (see docs/modules/):
+#   "crates/hathor-dsp-fft", "crates/hathor-dsp-measure", "crates/hathor-host-graph",
+#   "apps/hathor-audio-probe"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["Giovanni Muscia"]
+repository = "https://github.com/xGiova/Hathor"
+
+# Shared dependencies: versions live here, member crates inherit them.
+[workspace.dependencies]
+# cpal drives the WASAPI callbacks; the callback thread runs with
+# HIGH_PRIORITY_CLASS on Windows where it matters. Not optional in the product,
+# but enabled explicitly only where it is needed: the offline probe does not need it.
+cpal = "0.15"
+rtrb = "0.3"
+# rustfft: reference only, dev-dependency of the hathor-dsp-fft tests. Never linked
+# into the audio path.
+rustfft = "6.1"
+
+hathor-dsp-core = { path = "crates/hathor-dsp-core" }
+hathor-dsp-filters = { path = "crates/hathor-dsp-filters" }
+hathor-dsp-fft = { path = "crates/hathor-dsp-fft" }
+hathor-dsp-measure = { path = "crates/hathor-dsp-measure" }
+hathor-host-graph = { path = "crates/hathor-host-graph" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# panic = "abort" must NOT be set: the allocation guard and the audio-thread
+# tests rely on catch_unwind.
+debug = true
+
+[profile.bench]
+inherits = "release"
