@@ -25,8 +25,9 @@ you when, eight months from now, you no longer remember why a thing is the way i
 ## If you need **one specific module** → [modules/](modules/)
 
 Every module has its own MD with the same structure:
-`Purpose · How it works · Invariants (the rules that bite when violated) · Rust concepts
-it uses · DSP concepts it embodies · What is deferred and why · Exercises.`
+`Purpose · How it works · Invariants (the rules that bite when violated) · Acceptance
+criteria · Rust concepts it uses · DSP concepts it embodies · What is deferred and why ·
+Exercises.`
 
 | Module | Status | Document |
 |---|---|---|
@@ -36,7 +37,7 @@ it uses · DSP concepts it embodies · What is deferred and why · Exercises.`
 | `hathor-dsp-measure` | spec (M0) | [modules/hathor-dsp-measure.md](modules/hathor-dsp-measure.md) |
 | `hathor-host-graph` | spec (M0) | [modules/hathor-host-graph.md](modules/hathor-host-graph.md) |
 | gain staging & channel variance (M6 contract, policy not crate) | spec | [modules/hathor-calibration-variance.md](modules/hathor-calibration-variance.md) |
-| `hathor-nam` (proposed crate, gated G5) | draft spec (M6.5) | [modules/hathor-nam.md](modules/hathor-nam.md) |
+| `hathor-nam` (accepted draft, crate not yet created; gated G5) | draft spec (M6.5) | [modules/hathor-nam.md](modules/hathor-nam.md) |
 | `hathor-audio-probe` | spec (M0) | `modules/hathor-audio-probe.md` (spec due M0) |
 | `hathor-vst3-host` | spec (M5) | `modules/hathor-vst3-host.md` (spec due M5) |
 

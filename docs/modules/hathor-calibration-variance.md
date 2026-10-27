@@ -47,7 +47,7 @@ pub struct CalibrationRef {
 
 /// The strip's input stage: coefficient computed at UI/setup rate, ramped at frame rate.
 pub struct GainStagingNode {
-    g: hathor_dsp_core::param::SmoothedParam, // one-pole, tau per STYLE-mandated semantics
+    g: hathor_dsp_core::param::SmoothedParam, // one-pole, τ = time_s semantics per its doc in hathor-dsp-core
 }
 
 impl GainStagingNode {
@@ -76,7 +76,8 @@ frame inside `process()`, where the only remaining cost is the multiply.
 * **One home for the scale factor.** The strip applies `G_cal` *once*, at chain input. No
   insert — native node, CLAP, or VST3 through the bridge — may apply a second
   console-scale factor; a processor that needs its own input trim (NAM's "level match",
-  saturator drive) has its own parameter, *downstream* of `G_cal`. The pasted external spec
+  saturator drive) has its own parameter, *downstream* of `G_cal`. The [pasted external
+   spec](../archive/nam-gain-staging-spec-2026-10-27.md) (§6–7, archived verbatim in-repo)
   fused model-matching gain into the console gain; the contract deliberately un-fuses them,
   because a per-model correction must travel with the model slot, not with the strip.
 * **NAM metadata seeding** (planned, consumer = the NAM node, not the strip): `.nam` files
@@ -141,7 +142,8 @@ impl AnalogChannelVariance {
   `low_overhead_hash(channel_id)` with the project seed replacing `0x55555555` as the second
   mixing constant. CONVENTION §4.4's deterministic-RNG rule (`Lcg`) is for *tests*; the drift
   is data, not randomness: it is computed once, persisted, and never re-drawn.
-* **Honest note on the source numbers**: the pasted spec's struct says `nam_bias_offset ±0.005`
+* **Honest note on the source numbers**: the [archived
+  spec](../archive/nam-gain-staging-spec-2026-10-27.md) struct says `nam_bias_offset ±0.005`
   (linear ⇒ ±0.043 dB) while its prose says "a variance of just ±0.3 dB". The two disagree by
   ~7×. Decided 2026-10-27 (user): the **shipped** envelope is the conservative ±0.005 linear
   (≈±0.043 dB); the prose ±0.3 dB stays as the maximum project-configurable ceiling. The
@@ -252,7 +254,7 @@ signal-domain one · declared vs uncompensated latency (architecture §4).
   coherence; per-band vectors need a project-format decision (list vs scalar) that M5
   serialization should make with its eyes open.
 
-## Open questions / research findings
+## Decisions and research findings
 
 Decided by the user 2026-10-27 (recorded, not erased — the reasoning lived in this doc's
 first draft):

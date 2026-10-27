@@ -188,7 +188,8 @@ Acceptance: 40 tracks + 3 third-party plugins per track (one of them with a decl
 The visually biggest part and technically the least audio one. See §6 for the **cheap/expensive** decomposition of each wish: this is where the most months are saved.
 
 - Mixer: dense strips, colors/labels, foldback, visible routing, crossfader.
-- **Gain-staging & calibration engine + analog channel variance** (the NAM spec §6–7
+- **Gain-staging & calibration engine + analog channel variance** (the
+  [NAM spec §6–7](docs/archive/nam-gain-staging-spec-2026-10-27.md)
   contract — mixer-wide, *not* NAM-only): the strip's `G_cal` multiply at chain input, the
   configurable reference window −20…−14 dBFS (default −18), per-channel drift vectors hashed
   from `(channel_id, console_seed)` and persisted with the track, the 300 ms sweet-spot

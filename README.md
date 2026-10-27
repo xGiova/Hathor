@@ -36,7 +36,7 @@ share — which is why the lower layers expose it honestly.
 | `plugins/*` | EQ, Filter, SPAN-like, Compressor, Reverb, Delay, Saturator, kick↔bass phase-alignment plugin | M1–M4 | planned | — |
 | `crates/hathor-vst3-host` | C++ VST3 bridge (frozen ABI) | M5 | planned | — |
 | Channel-strip calibration & variance | `G_cal` gain-staging contract, seeded per-channel drift, sweet-spot meter | M6 | spec ([docs/modules/hathor-calibration-variance.md](docs/modules/hathor-calibration-variance.md)) | — |
-| `crates/hathor-nam` (proposed) | `.nam` loader + causal NN inference node (NAM captures) | M6.5 (gate G5) | spec ([docs/modules/hathor-nam.md](docs/modules/hathor-nam.md)) | — |
+| `crates/hathor-nam` (accepted draft, not yet created) | `.nam` loader + causal NN inference node (NAM captures) | M6.5 (gate G5) | draft spec ([docs/modules/hathor-nam.md](docs/modules/hathor-nam.md)) | — |
 
 <sub>* "Implemented" = green in debug **and** release, `clippy -D warnings` clean, realtime contract enforced (zero alloc/lock in `process`). Test counts are real `cargo test` results, refreshed at each milestone gate — not aspirations.</sub>
 

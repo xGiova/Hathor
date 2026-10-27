@@ -1,9 +1,10 @@
-# Module draft: `hathor-nam` — Neural Amp Modeler hosting (proposal, pre-milestone)
+# Module draft: `hathor-nam` — Neural Amp Modeler hosting
 
 > Status: **draft specification** — lead-accepted 2026-10-27; scope decision same day:
 > **in-tree core crate only, no CLAP bundle at M6.5** (see §Open questions Q1). Placement
 > **M6.5** (see [ROADMAP.md](../../ROADMAP.md)). Crate name `hathor-nam`, paths
-> `hathor_nam` (CONVENTION §naming). Expected dependencies: `hathor-dsp-core` (buffers,
+> `hathor_nam` (the project's `hathor-` crate-name convention, ROADMAP §1 repo tree). Expected
+> dependencies: `hathor-dsp-core` (buffers,
 > `Node`, ramps), optionally `hathor-dsp-measure` (validation harness). **Feasibility
 > verdict: feasible with constraints** — the constraints are budget evidence (gate G5) and
 > honest model-size claims, not architecture.
@@ -21,8 +22,8 @@ amplitude sensitivity is exactly what makes the gain-staging contract
 ([hathor-calibration-variance.md](hathor-calibration-variance.md)) observable, and its CPU
 shape (per-block matrix math with a hard 1333 µs/64-frame budget,
 [architecture.md](../architecture.md) §2) demands the same measured-not-opined discipline.
-The pasted external spec (§6–7) motivates the calibration contract; this doc scopes the
-model host itself.
+The [pasted external spec](../archive/nam-gain-staging-spec-2026-10-27.md) (§6–7) motivates
+the calibration contract; this doc scopes the model host itself.
 
 ## What a `.nam` file is (verified from source, not folklore)
 
