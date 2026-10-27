@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Measurement utilities: RMS, level tracking, sine-response probing."
+description = "Measurement utilities: dB, levels, correlation, alignment, RMS tracking."
 
 [dependencies]
 hathor-dsp-core.workspace = true

@@ -1,9 +1,11 @@
 # Module: `hathor-dsp-measure`
 
-> Status: **specification** (M0: alignment; M3: masking meter; M6: level tracking for the
-> gain-staging calibration contract). Expected dependencies:
-> `hathor-dsp-core`, `hathor-dsp-filters` (for the key filter and `db_to_lin`), `hathor-dsp-fft` (for the fast
-> cross-correlation in M3).
+> Status: **written, tested 54** (M0 primitives landed; M3: masking meter; M6: level tracking for
+> the gain-staging calibration contract). Dependencies: `hathor-dsp-core` — the whole product
+> coupling. `hathor-dsp-filters` exports `coeffs::db_to_lin` with a **design-oriented clamp**;
+> this crate deliberately carries its own **public meter pair** (`db::lin_to_db`/`db::db_to_lin`,
+> silence → `f32::NEG_INFINITY`): TD-22, two contracts on purpose. `hathor-dsp-fft` will arrive
+> as a dev-dependency for the M3 fast cross-correlation, nothing sooner.
 
 ## Purpose
 
@@ -16,7 +18,7 @@ Design principle: **pure functions, no allocation per call, results in small pre
 structures**. It is not a "meter plugin": it is a library of measurements that the meters (M1)
 and the kick↔bass plugin (M3) consume.
 
-## How it will work
+## How it works
 
 ### M0 — the primitives (few, useful immediately)
 
@@ -41,8 +43,8 @@ pub fn null_residue_db(a: &[f32], b: &[f32], gain_db: f32, invert: bool) -> f32;
 * **`null_residue_db`**: sums `a` with `b` scaled/inverted and measures the residual peak in
   dBFS. It is the kick↔bass plugin's acceptance ("null residue < −30 dB in 40-120 Hz") and the
   transparency test of *any* processor ("did I touch nothing?"). Per-band variant: pre-filter
-  with `hathor-dsp-filters` (band 40-120 Hz) before the null — that is why this module depends on the
-  filters.
+  with `hathor-dsp-filters` (band 40-120 Hz) before the null — a **consumer-side composition**
+  (the kick↔bass plugin owns the filters dependency; this crate does not).
 
 ### M3 — the masking meter
 
@@ -121,6 +123,10 @@ the kick↔bass plugin's UI shows both.
   already mapped in the ROADMAP.
 * **Transient detection** → M3, inside the kick↔bass plugin: the nudge "to the transient" is needed
   there; writing it earlier without its consumer (the nudge UI) means guessing the API.
+* **Read-only `View` meter variants** → M1: the shipped meters borrow `&Block`, the writable
+  view of the realtime contract; read-only consumers (a `ChannelBuffer::view()` on the UI side)
+  may want `View` variants of the same functions. None invented today — no consumer: the API
+  arrives with its first user, not with a guess.
 * **Sweet-spot classification** (is this reading "in the analog window"?) → M6: the math is
   `RmsTracker` + a comparison with the strip's `reference_dbfs`; the band itself belongs to the
   channel-strip contract ([hathor-calibration-variance.md](hathor-calibration-variance.md)),
@@ -132,7 +138,11 @@ the kick↔bass plugin's UI shows both.
    7. Then add noise at −20 dB and repeat: at what SNR does the measurement go off by ±1? (It
    is the question that decides whether the kick↔bass plugin's automatic nudge can be trusted.)
 2. Build two 50 Hz sinusoids in opposite phase: correlation = −1, null residue = −inf dB. Then
-   delay one by 1 ms (18°): the correlation rises to ~0.95, the null residue to ~−18 dB. These
+   delay one by 1 ms (18° at 50 Hz): the correlation rises to **−0.951** — cos 162°, still
+   anti-phase, and the sign is the lesson (the doc once said "+0.95": reading the magnitude
+   without the sign is exactly the UI mistake this module exists to prevent) — while the null
+   residue rises to an exact `2·sin(9°)` ≈ **−10.09 dBFS** (the earlier "~−18 dB" was wrong
+   arithmetic, not a rounding: the shipped `db::lin_to_db` states it honestly). These
    are the numbers the plugin's user must *see* — understanding them here means you can
    design the UI later.
 3. Prove to yourself why `Σ(a·b)/sqrt(Σa²Σb²)` is gain-invariant: double `b` and recompute.

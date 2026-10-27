@@ -162,8 +162,9 @@ pub fn bin_freq(k: usize, n: usize, sample_rate: f32) -> f32 {
 /// `freq·n/fs`, the inverse of [`bin_freq`].
 ///
 /// Module-doc exercise 3 made the point with numbers: 60 Hz at n = 16384/48 kHz is
-/// bin 20.5, i.e. not an integer — which is precisely why leakage exists and windows
-/// are not decoration.
+/// bin 20.48, i.e. not an integer — which is precisely why leakage exists and windows
+/// are not decoration. (The doc once said 20.5; that was rounding drift, caught by
+/// the test that now pins 20.48 — the lesson travels with the number.)
 pub fn freq_bin(freq: f32, n: usize, sample_rate: f32) -> f32 {
     (freq as f64 * n as f64 / sample_rate as f64) as f32
 }

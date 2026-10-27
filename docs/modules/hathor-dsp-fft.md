@@ -1,8 +1,9 @@
 # Module: `hathor-dsp-fft`
 
-> Status: **specification** (to be written in M0, the multi-rate bank in M1). Expected
-> dependencies: `hathor-dsp-core`. Verification dev-dependency: `rustfft` (in tests only, never in
-> the product).
+> Status: **written, tested 29** (kernels landed; the multi-rate bank is M1). Dependencies:
+> **none in the product** — `hathor-dsp-core` is a **dev-dependency only** (the guard tests in
+> `tests/alloc_contract.rs` need `AudioSection`; nothing in the shipped kernels imports it), and
+> `rustfft` likewise (in tests only, never in the product).
 
 ## Purpose
 
@@ -18,17 +19,40 @@ The fast Fourier transform, **written by us**, for two non-negotiable reasons:
 the numerical tests (tolerance 1e-4). It is the independent reference — the lesson of the
 `−a2·out` bug in `hathor-dsp-filters` applied by construction.
 
-## How it will work
+## How it works
 
 ### Phase M0 — the three kernels
 
 ```rust
-pub struct FftPlan { n: usize, twiddles: Vec<(f32, f32)>, bitrev: Vec<u32>, scratch: Vec<(f32,f32)> }
-impl FftPlan {
-    pub fn new(n: usize) -> Self;                  // n a power of 2; ALLOCATES HERE, nowhere else
-    pub fn process(&mut self, data: &mut [(f32,f32)]);   // in-place, complex
-    pub fn inverse(&mut self, data: &mut [(f32,f32)]);   // conj → process → conj → /n
+pub struct Complex { re: f32, im: f32 }   // the decision recorded in "Rust concepts" below, shipped:
+                                          // Copy, clearer than (f32, f32), same layout as [f32; 2]
+
+pub struct FftPlan {                      // NO scratch field: the complex kernel is in-place
+    n: usize,
+    twiddles: Vec<Complex>,               // e^{-2πik/n}, k < n/2 (half the table, half the cache lines)
+    bitrev: Vec<u32>,                     // the permutation that makes it in-place
 }
+impl FftPlan {
+    pub fn new(n: usize) -> Self;                    // power of two ≥ 2; ALLOCATES HERE, nowhere else
+    pub fn n(&self) -> usize;                        // documented panic on a bad n: programmer bug, setup
+    pub fn process(&mut self, data: &mut [Complex]); // in-place, e^{-2πikj/n} convention
+    pub fn inverse(&mut self, data: &mut [Complex]); // conj → process → conj → /n, same kernel
+}
+
+pub struct RealFftPlan {                             // the ONE plan that carries scratch: packing an
+    plan: FftPlan,                                   // &[f32] input needs a destination that is not
+    unpack_twiddles: Vec<Complex>,                   // the caller's memory
+    scratch: Vec<Complex>,
+}
+impl RealFftPlan {
+    pub fn new(n_samples: usize) -> Self;            // power of two ≥ 4
+    pub fn n_samples(&self) -> usize;                // N
+    pub fn bin_count(&self) -> usize;                // N/2 + 1 (DC..=Nyquist)
+    pub fn process(&mut self, samples: &[f32], bins: &mut [Complex]); // reads N, writes N/2+1
+}
+
+pub fn bin_freq(k: usize, n: usize, sample_rate: f32) -> f32;   // k·fs/n — the only home (invariant 3)
+pub fn freq_bin(freq: f32, n: usize, sample_rate: f32) -> f32;  // its inverse: fractional bin coordinate
 ```
 
 * **Radix-2 DIT**: bit-reversal permutation + `log2(n)` stages of butterflies. The twiddles
@@ -122,4 +146,6 @@ time-frequency constraint is not cheated, it is *architected*.
 2. Print the spectrum (in dB) of a real windowed signal with and without Hann: count how many
    dB the first sidelobe drops. It should be ~−31 vs ~−13: that is the window buying truth.
 3. Implement `bin_freq` and its inverse `freq_bin`, and use them to find at which bin 60 Hz
-   lands with n=16384 at 48 kHz (answer: 20.5 — not an integer: this is why leakage exists).
+   lands with n=16384 at 48 kHz (exact: 60·16384/48000 = **20.48** — not an integer: this is
+   why leakage exists. The earlier "20.5" in this doc was a rounding the test
+   `bin_and_freq_agree_with_the_doc_number` now pins: `freq_bin(60, 16384, 48k) = 20.48 ±1e-4`.)

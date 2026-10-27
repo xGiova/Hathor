@@ -1,7 +1,7 @@
 # Module: `hathor-host-graph`
 
-> Status: **specification** (M0: linear chain; M5: the real graph). Expected dependencies:
-> `hathor-dsp-core`.
+> Status: **written, tested 12+1** (M0 linear chain landed and guard-proved; the real graph is
+> M5). Dependencies: `hathor-dsp-core`.
 
 ## Purpose
 
@@ -11,31 +11,48 @@ Put `Node`s in sequence and make them cooperate: in M0 a **linear chain**
 `hathor-audio-probe` on a real chain (biquad + saturator + meter) and to measure the per-node cost,
 not to anticipate the mixer.
 
-## How it will work
+## How it works
 
 ### M0 — `Chain`
 
 ```rust
 pub struct Chain {
-    nodes: Vec<Box<dyn Node>>,     // processing order = insertion order
-    latency_samples: usize,        // the SUM of the latencies (series chain: they accumulate)
-    channels: usize, frames: usize,
-    scratch: ChannelBuffer,        // double buffer: in/out alternated, zero alloc per block
+    nodes: Vec<Slot>,          // Slot { node: Box<dyn Node>, prepared: bool }; order = insertion order
+    setup_ctx: ProcessCtx,     // synthesized by Chain::new (see below) — nodes get setup through it
+    hints: GraphHints,         // max_channels × max_frames: the declared shape every block must fit
+    scratch: ChannelBuffer,    // exists from M0; process never touches it until M5 needs rotation
 }
 impl Chain {
-    pub fn push(&mut self, node: Box<dyn Node>) -> Result<(), NodeError>;  // calls setup
-    pub fn process(&mut self, ctx: &ProcessCtx, io: &mut Block) -> Result<(), NodeError>;
-    pub fn latency_samples(&self) -> usize;
+    pub fn new(sample_rate: u32, channels: usize, max_frames: usize) -> Self;
+    pub fn push(&mut self, node: Box<dyn Node>) -> Result<(), NodeError>;  // calls setup immediately
+    pub fn process(&mut self, ctx: &ProcessCtx, io: &mut Block<'_>) -> Result<(), NodeError>;
+    pub fn latency_samples(&self) -> usize;      // Σ over nodes, RECOMPUTED per read
+    pub fn max_latency_samples(&self) -> usize;  // same law on the parameter-driven maxima
 }
 ```
 
-* **Ping-pong double buffer**: nodes that transform in place write into `io`; nodes that need
-  input≠output (none in M0, but the pattern is established now) use `scratch`. Alternating the
-  two avoids one copy per node. In M0 in-place would be enough, but the `scratch` field and the
-  pattern are set now so that the benchmark measures the real configuration.
-* `push` calls `setup(ctx, hints)` immediately: whoever adds a node after the stream started
-  does it from the control thread, and the `GraphHints` reach it from the engine. A node that
-  was not `setup`-ed in the chain is a bug: `process` refuses it (`prepared: bool` state).
+* **No cached latency field — LEAD DECISION, not drift.** The original sketch kept a
+  `latency_samples: usize` on the struct, updated at `push`. The implemented getters recompute
+  the sum on every read: the moment a node's latency becomes parameter-driven (linear-phase
+  mode, look-ahead length), an incrementally cached sum is *stale data wearing a trustworthy
+  face*, and a wrong sum silently mis-compensates every downstream path. Invariant 3's "the
+  sum, always" applies to the value's truth, not just its formula; the getters are O(nodes)
+  on chains of ≤ tens of nodes, read at UI/setup rate — a cost that does not exist next to the
+  risk it deletes.
+
+* **In place in M0, scratch door established**: every node transforms `io` in place; nodes that
+  will need input≠output use `Chain::with_scratch(|block| …)` — the closure pattern M5
+  generalizes into `with(id, |blk| …)`. The scratch buffer is allocated once in `new` and the
+  door never allocates (the test `the_scratch_door_is_shaped_and_never_allocates` proves it
+  under the guard). In-place would be enough today; the pattern is *established*, not
+  anticipated, so the benchmark measures the real configuration — actual rotation of the two
+  buffers arrives with M5.
+* `push` calls `setup(&self.setup_ctx, &self.hints)` immediately — the two values are
+  **synthesized by `Chain::new(sample_rate, channels, max_frames)`**: `ProcessCtx::bare(sample_rate,
+  max_frames)` (so a node sizes its history for the *worst* block from day one) and `GraphHints
+  { max_channels: channels, max_frames }`. Whoever adds a node while the stream runs does it
+  from the control thread. If `setup` fails the node is **not added** (it drops on the way out:
+  a half-prepared node is exactly what `process` refuses — `prepared: bool` per slot).
 * **Latency**: `Σ node.latency_samples()`. In a series chain latencies add up; in the M5 graph
   the sum is *per path* and the compensation aligns the paths (architecture §4). The method
   exists from M0 because `hathor-audio-probe` prints it: seeing "chain: 0 samples" today and "chain:
@@ -107,6 +124,11 @@ processing and why the double buffer exists.
 
 ## Deferred (and why)
 
+* **Oversized-block handling is a stopgap** → M5: today `process` refuses a block that exceeds
+  the declared shape *before any node sees it* — `NodeError::Internal("block exceeds the chain's
+  declared shape")`, because nodes allocated their state against `GraphHints` and a bigger block
+  must never reach them. An honest wall, not a policy: the re-setup story is the ledger,
+  TD-21 (and TD-11 for the channel/sample-rate change question).
 * **Dynamic topology, sidechain, sends** → M5: without a host there is nobody driving them; the
   APIs would be guesses. The shape of the arena is already decided (architecture §4), the code
   is not.
