@@ -1,0 +1,21 @@
+[package]
+name = "hathor-host-graph"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Host-side graph: Chain of Nodes, latency summing, parameter fan-out."
+
+[dependencies]
+hathor-dsp-core.workspace = true
+
+[dev-dependencies]
+hathor-dsp-filters.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+panic_in_result_fn = "deny"
+exit = "deny"
+todo = "deny"

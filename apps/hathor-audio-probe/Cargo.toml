@@ -1,0 +1,20 @@
+[package]
+name = "hathor-audio-probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The offline WASAPI probe: proves the realtime contract on real hardware."
+
+[dependencies]
+cpal.workspace = true
+rtrb.workspace = true
+hathor-dsp-core.workspace = true
+hathor-dsp-filters.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+exit = "deny"
+todo = "deny"

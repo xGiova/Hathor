@@ -2,6 +2,7 @@
 name = "hathor-dsp-filters"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "RBJ biquad in DF2T, with a coefficient ramp (no zipper noise) and an AVX2 kernel with 8 channels-in-lanes."
 

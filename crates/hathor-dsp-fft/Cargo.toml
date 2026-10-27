@@ -1,0 +1,20 @@
+[package]
+name = "hathor-dsp-fft"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Realtime-safe FFT: powers-of-two complex + real transforms, setup-allocated plans."
+
+[dependencies]
+
+[dev-dependencies]
+rustfft.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+panic_in_result_fn = "deny"
+exit = "deny"
+todo = "deny"

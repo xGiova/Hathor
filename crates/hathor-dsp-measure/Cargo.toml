@@ -1,0 +1,18 @@
+[package]
+name = "hathor-dsp-measure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Measurement utilities: RMS, level tracking, sine-response probing."
+
+[dependencies]
+hathor-dsp-core.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+panic_in_result_fn = "deny"
+exit = "deny"
+todo = "deny"
