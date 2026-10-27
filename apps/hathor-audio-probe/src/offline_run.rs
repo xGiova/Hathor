@@ -70,7 +70,18 @@ pub struct OfflineOutcome {
     pub view: CountersView,
     /// Cost distribution over the chunks.
     pub cost: CostSummary,
-    /// Guard total for the whole loop.
+    /// Process-wide guard total at the end of the loop (`alloc_guard::allocs_total()`).
+    ///
+    /// This counts **every thread's** sections, not just the rehearsal's: it is a witness
+    /// that nothing else in the process allocated in an audio window, and it is evidence
+    /// about this loop only while the caller owns the process. The standalone binary does
+    /// (two threads, one of which opens no section); a `cargo test` harness does not, which
+    /// is why every guard-touching test in this crate takes `crate::guard_serial()` before
+    /// asserting or resetting it — see
+    /// [`pump::a_process_wide_reading_belongs_to_no_single_thread`](crate::pump), which
+    /// demonstrates the sharing rather than trusting it away. The thread-owned ground truth
+    /// is [`OfflineOutcome::view`]'s `allocs_sum` / `allocs_max_per_callback`, read from
+    /// each section's own `allocs_here()`.
     pub guard_allocs: u64,
     /// Wallclock seconds the loop took — the real cost of `cycles` chunks of DSP on
     /// this machine, not a simulation.
@@ -388,6 +399,30 @@ mod tests {
     fn execute_runs_the_loop_it_claims_to_and_reports_zero_allocations() {
         // A real 500-cycle rehearsal: the shortest thing that still proves the loop,
         // the guard and the report all work together in this binary.
+        //
+        // ROOT CAUSE OF THE ONE FLAKY TEST IN THE TREE, STATED WHERE IT CAN BE READ:
+        // `res.guard_allocs` is `alloc_guard::allocs_total()`, a *process-wide* atomic, and
+        // the verdict fed by it (`run_report::evaluate`: `allocs_sum == 0 && guard_allocs
+        // == 0`) therefore made a statement about every thread in the test binary while
+        // claiming to be about this loop. Two siblings broke it without the pump doing
+        // anything wrong: `pump::the_guard_is_live_in_this_binary_negative_control`
+        // allocates inside a section on purpose (that is what makes the instrument honest),
+        // and `bench::execute` resets the counters and flips the global panic-mode. Worse
+        // than a wrong number: `execute` here sets *strict* mode, whose flag is also global,
+        // so an unlocked sibling could set measure mode mid-loop and the rehearsal's
+        // strictness would have been scheduled luck rather than a property. Debug's slower
+        // loop widens the overlap window, which is why it appeared in
+        // `cargo test --workspace` and not in the isolated or release runs — an absent
+        // failure was never evidence of an absent race, and `pump.rs` kept a *private*
+        // `static LOCK` that serialised its guard tests against each other and against
+        // nothing else. See `pump::a_process_wide_reading_belongs_to_no_single_thread`,
+        // which demonstrates the contamination instead of trusting it not to happen.
+        //
+        // The fix is the lock, not a softer assertion: nothing here is relaxed to
+        // "0 is likely". Holding the one crate-wide guard lock makes the process this test
+        // reads from exactly the process it is testing, which is the only condition under
+        // which a process-wide zero means anything.
+        let _serial = crate::guard_serial();
         let o = OfflineOptions {
             rate: 48_000,
             frames: 64,
@@ -397,7 +432,11 @@ mod tests {
         let res = execute(&o).expect("rehearsal");
         assert_eq!(res.view.chunks, 500, "one chunk per cycle");
         assert_eq!(res.view.frames, 32_000);
+        // Thread-local ground truth: every section's own `allocs_here()`, summed and
+        // maxed by the pump. Immune to siblings, and the M0 criterion.
         assert_eq!(res.view.allocs_sum, 0, "the M0 criterion");
+        assert_eq!(res.view.allocs_max_per_callback, 0, "not one block, ever");
+        // Process-wide witness, meaningful only because the lock owns the process.
         assert_eq!(res.guard_allocs, 0, "and the guard agrees");
         assert!(res.passed(), "{:?}", run_report::lines(&res.checks()));
         assert!(res.cost.samples > 0, "samples crossed the ring");

@@ -633,15 +633,23 @@ pub fn last_section_allocs() -> u64 {
 mod tests {
     use super::*;
     use crate::cost_summary::budget_ns;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
 
-    /// Guard state is process-global; these tests must own it alone. Poison is
-    /// ignored on purpose (a failing assertion leaves the data sound) — the same
-    /// deviation the core's guard tests document.
+    /// Guard state is process-global — the panic-mode flag and both atomics — so every
+    /// test that touches it in this binary must own it alone. That lock is
+    /// **`crate::guard_serial()`, the one lock for the whole binary**, and not a private
+    /// one: this module used to keep its own `static LOCK`, which serialised pump tests
+    /// against each other and against nothing else. `offline_run`'s rehearsal and the
+    /// negative control below then ran as siblings, and the process-wide total they both
+    /// read was written by the other — a flaky zero, and (because `execute` for `offline`
+    /// sets *strict* mode while other tests set *measure*) the mode a rehearsal believes
+    /// it is enforcing could be flipped mid-loop. Poison is ignored on purpose (a failing
+    /// assertion leaves the data sound) — the same deviation the core's guard tests
+    /// document. **Every test that opens a section — directly or through `Pump::render` —
+    /// takes it for the whole of its body**, so no test's zero is produced while a sibling
+    /// flips the global mode or resets the shared counters.
     fn serial_guard() -> MutexGuard<'static, ()> {
-        static LOCK: Mutex<()> = Mutex::new(());
-        LOCK.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::guard_serial()
     }
 
     fn pump(rate: u32, ch: u16, chunk: u32, fft: usize, tone: Tone) -> (Pump, Consumer<u64>) {
@@ -716,6 +724,7 @@ mod tests {
         let _serial = serial_guard();
         alloc_guard::set_panic_on_audio_alloc(false);
         alloc_guard::reset_counters();
+        let before = alloc_guard::allocs_total();
         {
             let section = AudioSection::enter().expect("enter");
             // LEGAL ALLOCATION: deliberate, inside a test that proves detection works.
@@ -723,12 +732,58 @@ mod tests {
             assert_eq!(section.allocs_here(), 1, "the Vec was counted");
             drop(leaked);
         }
+        // The witness is the *thread-local* count above plus the process-wide total, not
+        // `allocs_last_section()`: every section closed by any thread stores into that one
+        // atomic, so an unlocked sibling's alloc-free `Pump::render` can overwrite it with
+        // 0 between my section closing and my reading it. Under the shared lock the total
+        // has exactly one possible source, which is why it can be asserted as an equality.
         assert_eq!(
-            alloc_guard::allocs_last_section(),
-            1,
+            alloc_guard::allocs_total(),
+            before + 1,
             "a zero in the other test is meaningful only because this one is not"
         );
         alloc_guard::reset_counters();
+    }
+
+    #[test]
+    fn a_process_wide_reading_belongs_to_no_single_thread() {
+        // ROOT CAUSE OF THE FLAKY `offline_run` ASSERTION, kept as a test so it cannot be
+        // re-misused: `allocs_total()` counts *every* thread's sections. A sibling test
+        // that allocates inside a section — the negative control directly above, on
+        // purpose — raises the number this test reads, and the pump's own contract was
+        // untouched. So `guard_allocs == 0` is a statement about the process, and it is
+        // only evidence about the code under test while the code under test owns the
+        // process: hence `crate::guard_serial()` on every guard-touching test in this
+        // binary, and hence this test, which demonstrates the contamination rather than
+        // trusting it not to happen.
+        let _serial = serial_guard();
+        alloc_guard::set_panic_on_audio_alloc(false);
+        alloc_guard::reset_counters();
+        let before = alloc_guard::allocs_total();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let section = AudioSection::enter().expect("child enter");
+                // LEGAL ALLOCATION: deliberate, in a child thread, to prove the sharing.
+                let v: Vec<f32> = vec![0.0; 4];
+                assert_eq!(section.allocs_here(), 1, "the child saw its own allocation");
+                drop(v);
+                // The child's own thread-local view says nothing about the parent, and the
+                // parent's TLS stays 0: the only thing they share is the process-wide total.
+                assert_eq!(
+                    section.allocs_here(),
+                    1,
+                    "the free() did not count as a second allocation"
+                );
+            });
+        });
+        let after = alloc_guard::allocs_total();
+        alloc_guard::reset_counters();
+        assert!(
+            after > before,
+            "the child's section allocated inside its own window; the parent's reading of \
+             the SAME process-wide counter moved from {before} to {after} — proof that a \
+             process-wide total is not a per-test ground truth"
+        );
     }
 
     #[test]
@@ -752,6 +807,7 @@ mod tests {
 
     #[test]
     fn the_output_is_real_signal_and_the_analysis_consumed_it() {
+        let _serial = serial_guard();
         let (mut pump, consumer) = pump(48_000, 2, 64, 1_024, Tone::Sine(440.0));
         let mut out = [0.0f32; 128];
         // 20 chunks = 1280 frames > the 1024-frame window: at least one transform.
@@ -799,6 +855,7 @@ mod tests {
 
     #[test]
     fn a_silence_tone_still_runs_the_chain_and_the_transform() {
+        let _serial = serial_guard();
         let (mut pump, consumer) = pump(48_000, 2, 64, 1_024, Tone::Silence);
         let mut out = [7.0f32; 128];
         for _ in 0..20 {
@@ -818,6 +875,7 @@ mod tests {
 
     #[test]
     fn monitor_input_reads_the_buffer_the_driver_left_behind() {
+        let _serial = serial_guard();
         let (mut pump, consumer) = pump(48_000, 2, 4, 4, Tone::Silence);
         // Interleaved ramp: L = 0,1,2,3 · R = 10,11,12,13.
         let mut out = [0.0f32, 10.0, 1.0, 11.0, 2.0, 12.0, 3.0, 13.0];
@@ -834,6 +892,7 @@ mod tests {
 
     #[test]
     fn a_ragged_buffer_tail_is_silenced_and_only_whole_frames_are_counted() {
+        let _serial = serial_guard();
         let (mut pump, consumer) = pump(48_000, 2, 64, 1_024, Tone::Sine(440.0));
         // 129 samples: 64 whole frames + one orphan.
         let mut out = [9.0f32; 129];
@@ -847,6 +906,7 @@ mod tests {
 
     #[test]
     fn an_empty_buffer_is_silently_fine() {
+        let _serial = serial_guard();
         let (mut pump, consumer) = pump(48_000, 2, 64, 1_024, Tone::Sine(440.0));
         let mut nothing: [f32; 0] = [];
         pump.render(&mut nothing, false).expect("render");
@@ -862,6 +922,7 @@ mod tests {
 
     #[test]
     fn every_chunk_publishes_exactly_one_timing_sample() {
+        let _serial = serial_guard();
         let (mut pump, consumer) = pump(48_000, 2, 64, 1_024, Tone::Sine(440.0));
         let mut drain = crate::timing_ring::TimingDrain::new(consumer, 256);
         let mut out = [0.0f32; 480 * 2];
@@ -884,6 +945,7 @@ mod tests {
 
     #[test]
     fn a_stopped_pump_writes_silence_and_counts_nothing() {
+        let _serial = serial_guard();
         let (mut pump, consumer) = pump(48_000, 2, 64, 1_024, Tone::Sine(440.0));
         let counters = pump.counters();
         let mut out = [3.0f32; 128];
@@ -946,6 +1008,7 @@ mod tests {
 
     #[test]
     fn ftz_is_installed_once_and_reported() {
+        let _serial = serial_guard();
         let (mut pump, consumer) = pump(48_000, 2, 64, 1_024, Tone::Sine(440.0));
         let mut out = [0.0f32; 128];
         pump.render(&mut out, false).expect("render");

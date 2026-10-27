@@ -38,7 +38,7 @@ Exercises.`
 | `hathor-host-graph` | written, tested (M0 Chain) | [modules/hathor-host-graph.md](modules/hathor-host-graph.md) |
 | gain staging & channel variance (M6 contract, policy not crate) | spec | [modules/hathor-calibration-variance.md](modules/hathor-calibration-variance.md) |
 | `hathor-nam` (accepted draft, crate not yet created; gated G5) | draft spec (M6.5) | [modules/hathor-nam.md](modules/hathor-nam.md) |
-| `hathor-audio-probe` | spec (M0) | `modules/hathor-audio-probe.md` (spec due M0) |
+| `hathor-audio-probe` | written, tested | [modules/hathor-audio-probe.md](modules/hathor-audio-probe.md) |
 | `hathor-vst3-host` | spec (M5) | `modules/hathor-vst3-host.md` (spec due M5) |
 
 ## How to read the code of this project

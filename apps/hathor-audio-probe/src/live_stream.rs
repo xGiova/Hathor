@@ -640,6 +640,12 @@ pub fn execute(
     drain.drain();
 
     let view = counters.view();
+    // The process-wide guard total is a legitimate second witness here and nowhere else:
+    // in this binary exactly two threads exist while the stream runs, the driver thread is
+    // the only one that ever opens an `AudioSection`, and the control thread has spent the
+    // whole time draining a ring. The moment a second section owner exists this reading
+    // stops being evidence about the callback — which is the trap that made the unit test
+    // of `offline_run::execute` flaky; see `OfflineOutcome::guard_allocs`.
     let guard_total = alloc_guard::allocs_total();
     let mut samples = drain.into_samples();
     let cost = CostSummary::from_samples(&mut samples, budget);

@@ -881,6 +881,12 @@ mod tests {
     fn execute_returns_ok_on_a_machine_where_no_kernel_allocates() {
         // `bench` is the G1 deliverable: it must be runnable, not just compilable. The
         // assertion is the exit status; the printing is what the report quotes.
+        //
+        // `execute` sets the global panic mode to measure and zeroes the shared counters
+        // before its rows, so it owns the process for as long as it runs — the same crate
+        // lock the rehearsal and the pump tests take. Without it, a sibling's reset could
+        // erase a row's violation and this test would still pass.
+        let _serial = crate::guard_serial();
         let o = BenchOptions { iterations: 512 };
         assert!(
             execute(&o).is_ok(),

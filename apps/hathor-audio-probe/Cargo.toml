@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The offline WASAPI probe: proves the realtime contract on real hardware."
+description = "M0 harness: devices, live consent-gated WASAPI run, strict-guard offline rehearsal, cost bench."
 
 [dependencies]
 cpal.workspace = true

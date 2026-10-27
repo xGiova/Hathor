@@ -1,15 +1,16 @@
-# Module: `hathor-audio-probe` (app, L5)
+# Module: `hathor-audio-probe`
 
-> Status: **written, tested 168, gates green (build/test ×debug+release, clippy `-D warnings`, fmt)**.
+> Status: **written, tested 169, gates green (build/test ×debug+release incl. the full
+> workspace in both profiles, clippy `-D warnings`, fmt)**.
 > Dependencies: `cpal` 0.15.3, `rtrb` 0.3.6, `hathor-dsp-core`, `hathor-dsp-filters`,
 > `hathor-dsp-fft`, `hathor-dsp-measure`, `hathor-host-graph`. Not a library: one binary,
-> four subcommands. `docs/**` is outside the builder's write scope, so this file is a
-> **draft** delivered from `apps/hathor-audio-probe/DOC-DRAFT.md` for the lead to place.
+> four subcommands — an **L5 app**. Drafted in-crate as `apps/hathor-audio-probe/DOC-DRAFT.md`,
+> relocated to `docs/modules/` 2026-10-27 when the build session landed.
 
 ## Purpose
 
 Turn CONVENTION §2's realtime contract from prose into a number, and do it on the machine
-that has to run the DAW. Three questions, three subcommands:
+that has to run the DAW. Four questions, four subcommands:
 
 | Question | Subcommand | Touches hardware? |
 | --- | --- | --- |
@@ -95,7 +96,7 @@ so the gate cannot rot into a flag check that still opens the device.
 
 Ten checks, each `ok`/`warn`/`FAIL`, printed after the device is released. `allocations
 observed in the callback` is the hard gate: non-zero ⇒ FAIL. Worst-chunk-cost FAILs above
-`warn_ns = 0.40 × budget` (ROADMAP §8 criterion 4), using `cost_summary::BUDGET_64_48K_NS =
+`warn_ns = 0.40 × budget` (ROADMAP M0 criterion 4), using `cost_summary::BUDGET_64_48K_NS =
 (64 × 10⁹)/48000 = 1,333,333 ns`, which is the same 1333.33 µs as
 `hathor_dsp_core::BUDGET_64_48K_US` spelled in ns.
 
@@ -189,15 +190,23 @@ Printed by the run report as four `not …` lines so the omission is visible, no
 3. Legacy flag aliases (`--list`, `--stream`) are accepted; harmless, and the old notes in
    `docs/` use them.
 
-## Tests (168, all inline — no dev-dependencies)
+## Tests (169, all inline — no dev-dependencies)
 
-`run_report` 19, `pump` 17, `device_plan` 14, `cli` 13, `counters` 12, `live_stream` 12,
+`run_report` 19, `pump` 18, `device_plan` 14, `cli` 13, `counters` 12, `live_stream` 12,
 `bench` 11, `stamp` 10, `cost_summary` 9, `listing` 9, `tone` 8, `fft_window` 7,
 `offline_run` 7, `interleave` 7, `timing_ring` 6, `main` 4, `probe_error` 3.
 
 Guard-state tests share process-global state, so they serialise on
 `main::guard_serial()` (a `Mutex<()>`, poison-tolerant per STYLE) instead of assuming the
-harness runs one thread. Pure logic (config choice, stats, percentile, window shift, tone
+harness runs one thread. The discipline is enforced by the source of truth: guard state is
+process-global in three places — the panic-mode flag, `TOTAL_ALLOCS` and `LAST_SECTION_ALLOCS`.
+Only `AudioSection::allocs_here()` is thread-owned, so it is the ground truth; `allocs_total()`
+counts every thread's sections and is a witness only while the reader owns the process. That is
+why one mutex (`main::guard_serial()`) covers all guard-touching tests in this binary — an
+earlier private lock in `pump.rs` made "serialised" illusory and produced a flaky zero, the only
+flake the project has had; `pump::a_process_wide_reading_belongs_to_no_single_thread` now
+demonstrates the misuse on demand so nobody re-commits it.
+Pure logic (config choice, stats, percentile, window shift, tone
 quantisation, date math) is tested against hand-computed anchors — the `stamp` day numbers
 against .NET's own date arithmetic, never against this crate's own formula.
 

@@ -105,16 +105,46 @@ Deliverables:
 - `hathor-dsp-fft`: `rustfft` wrapper + our own radix-2 with a twiddle table, real-FFT via packing.
 - `hathor-dsp-measure`: L/R correlation, RMS, dB, **`time_align_lag()`** (cross-correlation: the numerical seed of the kick↔bass plugin).
 - `hathor-host-graph`: linear `Chain`.
-- `hathor-audio-probe`: real WASAPI stream + **`--offline` mode** (runs even without a sound card) + benchmark.
+- `hathor-audio-probe`: subcommands `devices` / `run` (live WASAPI stream, consent-gated) / `offline` (runs even without a sound card) / `bench`; the legacy `--list/--stream/--offline/--bench` spellings still parse as aliases. CLI spec: [docs/modules/hathor-audio-probe.md](docs/modules/hathor-audio-probe.md).
 
 Acceptance criteria:
 1. `cargo test --release` green on every crate.
-2. `hathor-audio-probe --offline` completes **20,000 cycles** at 64/48 kHz with **0 allocations** on the guard.
+2. `hathor-audio-probe offline` completes **20,000 cycles** at 64/48 kHz with **0 allocations** on the guard.
 3. The *negative* test passes: a `Vec::push` inside the section trips the guard (strict) or counts it (measure). If it does not blow up, the guard is decoration.
 4. Real stream opened at buffer 64: **0 xruns in 60 s**, worst-case callback < **0.40×** budget.
 5. Biquad numbers against the RBJ reference within 1e-6; own FFT vs `rustfft` within 1e-4; real-FFT round-trip < 1e-6.
 6. Benchmark prints ns/frame for: scalar mono biquad, AVX2 8-lane biquad (with and without transpose), element-wise auto-vectorized, FFT 4096/16384. **With the honest reading: a recursive filter is not vectorized along frames** (state dependency), it is vectorized *across channels*.
 7. `clippy -D warnings` clean, with the disallowed-methods configured.
+
+Results, **measured 2026-10-27 on the dev machine** (release build, rustc 1.99.1; wall-clock
+µs from `std::time::Instant` pairs, **NOT CPU cycles**; repeat-run spread ≈ ±10% single-machine):
+
+1. ✅ full-workspace tests green debug **and** release, locally (312/312) and on the CI
+   runner (the `gates` job on the probe commit ran all four steps green).
+2. ✅ `hathor-audio-probe offline`: 20,000 cycles at 64/48 kHz, **0 allocations under the
+   STRICT guard** (callback total, process-wide, and max-per-callback all 0); worst chunk
+   64.9 µs = 0.049× budget; ≈47× real-time throughput.
+3. ✅ the guard is not decoration: a deliberate allocation inside a section is counted
+   (measure mode), the negative-control tests prove the counter is live in every binary that
+   asserts zeros, and `pump::a_process_wide_reading_belongs_to_no_single_thread` demonstrates
+   on demand why the process-wide reading belongs to no single thread.
+4. ⏳ live `run` at buffer 64 — **pending**: it is the G1 close event, a hardware session with
+   the owner present (the probe refuses to open a device without `--i-have-user-consent`).
+5. ✅ biquad vs the RBJ reference within 1e-6; own FFT vs `rustfft`: measured worst errors
+   3.8e-6 (n=256) → 6.1e-5 (n=16384), assert holds the spec's 1e-4; real-FFT vs the padded
+   complex reference 2.9e-6→4.6e-5, round-trip well inside 1e-6.
+6. ✅ `bench` prints per-unit ns for every row the criterion names — scalar mono biquad
+   **3.2 ns/frame**; AVX2 8-lane **0.3 ns/frame** (~10×), **0.5 with the transpose in/out**;
+   auto-vectorised element-wise **0.7 ns/frame**; `RealFftPlan` 1024/4096/16384 =
+   **4.19/19.3/93.1 µs**; one full live-path chunk (tone+chain+door+FFT+interleave) =
+   **5.98 µs = 0.45% of the 1333.33 µs budget**. The honest reading the criterion demands,
+   stated by the binary itself: a recursive filter is **not** vectorisable along frames (state
+   dependency) — the 10× win is *across 8 channels in lanes*, and it survives the layout
+   change. Rust-vs-C++ reading: with ~200× headroom on the analyzer window, the engine stays
+   Rust; revisit only if M6.5's NN contract (G5) says otherwise.
+7. ⚠ half: `clippy -D warnings` is clean workspace-wide; the **disallowed-methods list is not
+   configured yet** (TD-23) — today the allocation guard enforces the contract at runtime,
+   where a static list would enforce it at compile time.
 
 Unblocks: the language choice stops being a matter of faith. And you have a test bench for every CPU figure to come.
 
@@ -362,7 +392,7 @@ and `fmt --check` green on both crates (TD-05); the mechanical i18n migration to
 **and** release.
 
 1. Close the remaining M0 code: `hathor-dsp-fft`, `hathor-dsp-measure` (minimal), `hathor-host-graph` `Chain`.
-2. `hathor-audio-probe`: `--list`, `--offline`, `--stream`, `--bench`.
+2. `hathor-audio-probe`: `devices` / `run` / `offline` / `bench` (old notes' `--list/--offline/--stream/--bench` parse as legacy aliases; the real CLI lives in [docs/modules/hathor-audio-probe.md](docs/modules/hathor-audio-probe.md)).
 3. **Benchmark number 1 on screen** → G1: Rust confirmed, or a C++ bridge for the host; then
    the M0 commit with the message "contract + numbers".
 4. TD-07 research landed (§1 "To verify"): SDK MIT, nih-plug plugin-side, hosting prior art =
