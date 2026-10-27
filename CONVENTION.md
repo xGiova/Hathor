@@ -96,7 +96,7 @@ deviations (§D).
   committer was wrong.)
 - CI (`.github/workflows/ci.yml`) runs the same four gates as the local ones — fmt, clippy
   `-D warnings`, tests debug **and release** — on every push/PR to `main`, plus an MSRV job
-  at the pinned 1.85. A red CI blocks the gate: "green on my machine" is not evidence. The
+  at the pinned 1.88. A red CI blocks the gate: "green on my machine" is not evidence. The
   G1 hardware run is intentionally NOT in CI (runners have no audio device): it is a
   measured human-present session whose numbers get committed with the `measured` label.
 
@@ -125,7 +125,10 @@ deviations (§D).
 
 ## 9. Compatibility
 
-- MSRV = 1.85 (bound by `cpal`). Target: `x86_64-pc-windows-msvc` today; the code *must
+- MSRV = 1.88, **measured** 2026-10-27 (`cargo +1.88.0 check --workspace --all-targets` → exit 0). The
+  previously declared 1.85 was false and not bound by `cpal` (cpal 0.15.3 declares 1.70): the real floor
+  is `std::arch` x86 intrinsics, which became `safe fn` only in 1.88. Target: `x86_64-pc-windows-msvc`
+  today; the code *must
   not* make portability impossible (no `std`-only Windows APIs in the core), but nothing is
   optimized for undeclared platforms.
 - `ABI_CONTRACT_VERSION` (hathor-dsp-core): bumped **only** for a real break of the

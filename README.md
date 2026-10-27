@@ -55,7 +55,7 @@ share — which is why the lower layers expose it honestly.
 ## Getting started
 
 ```sh
-rustup toolchain install stable   # MSRV 1.85, tested on 1.99
+rustup toolchain install stable   # MSRV 1.88, tested on 1.99
 cargo test                        # unit + behavioral tests
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check

@@ -445,14 +445,16 @@ pub mod lanes8 {
         ///
         /// # Safety
         /// Requires `avx2`+`fma`; `data.len()` a multiple of [`LANES`].
-        #[allow(clippy::manual_is_multiple_of)] // is_multiple_of() needs Rust 1.87 > MSRV 1.85.
+        #[allow(clippy::manual_is_multiple_of)]
+        // is_multiple_of() (Rust 1.87) is inside the 1.88 floor; the manual form stays
+        // in this hot unsafe fn - zero behavior change over a readability lint.
         #[target_feature(enable = "avx2,fma")]
         pub unsafe fn process(&mut self, data: &mut [f32]) {
             debug_assert!(data.len() % LANES == 0);
             let (b0, b1, b2, na1, na2) = (self.b0, self.b1, self.b2, self.na1, self.na2);
             let mut z1 = self.z1;
             let mut z2 = self.z2;
-            // const-generic chunks_exact::<N>() needs Rust 1.93 > MSRV 1.85.
+            // const-generic chunks_exact::<N>() needs Rust 1.93 > MSRV 1.88.
             #[allow(clippy::chunks_exact_to_as_chunks)]
             for chunk in data.chunks_exact_mut(LANES) {
                 // SAFETY: the chunk contains exactly LANES=8 contiguous floats.

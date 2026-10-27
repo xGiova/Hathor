@@ -63,7 +63,7 @@ the Google guide applies as written (read it — this file is not a substitute).
    `// SAFETY:` line with the technical justification; `unsafe_op_in_unsafe_fn` stays
    `deny` at the workspace level. The guide requires benchmarks as part of the
    justification — `hathor-audio-probe` numbers are cited inside the unsafe modules.
-7. **No unstable features**, stable toolchain pinned by `rust-version` (MSRV 1.85).
+7. **No unstable features**, stable toolchain pinned by `rust-version` (MSRV 1.88, measured 2026-10-27).
 8. **Public enums/structs across crate boundaries**: `#[non_exhaustive]` where the
    API can grow (`FilterKind`, `NodeError`, `AudioSectionError` — tracked as TD-17).
 9. **Documentation**: `missing_docs` warning stays on; every public item has `///`;

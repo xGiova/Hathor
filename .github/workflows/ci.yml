@@ -1,7 +1,8 @@
 # Gates, not vibes: everything CI can prove without an audio device.
 # fmt + clippy(-D) + tests debug AND release (the release run is the real gate —
 # M0 learned twice that debug green proves nothing about optimizer behavior),
-# plus an MSRV job holding the line at 1.85. The G1 hardware run is deliberately
+# plus an MSRV job holding the line at 1.88 (measured floor, 2026-10-27 — the old
+# declared 1.85 was false: std::arch x86 intrinsics became safe fns only in 1.88). The G1 hardware run is deliberately
 # NOT here: GitHub runners have no WASAPI device; it is a measured, committed,
 # human-present session (ROADMAP §M0).
 name: CI
@@ -44,9 +45,9 @@ jobs:
       - uses: actions/checkout@v4
       # The pinned floor in Cargo.toml (rust-version.workspace, TD history: it was
       # declared but not inherited until 43b651c). Nothing may use newer APIs.
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
         with:
           key: msrv
-      - name: Check everything compiles at 1.85
+      - name: Check everything compiles at 1.88
         run: cargo check --workspace --all-targets

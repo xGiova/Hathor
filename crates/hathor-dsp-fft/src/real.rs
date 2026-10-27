@@ -111,8 +111,11 @@ impl RealFftPlan {
             nc + 1
         );
 
-        // 1. Pack: even frames → re, odd frames → im.
-        for (pair, slot) in samples.chunks_exact(2).zip(self.scratch.iter_mut()) {
+        // 1. Pack: even frames → re, odd frames → im. N is a power of two >= 4, so
+        // the chunk size is constant and the tail is provably empty.
+        let (pairs, tail) = samples.as_chunks::<2>();
+        debug_assert!(tail.is_empty());
+        for (pair, slot) in pairs.iter().zip(self.scratch.iter_mut()) {
             *slot = Complex::new(pair[0], pair[1]);
         }
 
