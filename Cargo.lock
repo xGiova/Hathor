@@ -273,6 +273,7 @@ version = "0.0.0"
 name = "hathor-dsp-fft"
 version = "0.0.0"
 dependencies = [
+ "hathor-dsp-core",
  "rustfft",
 ]
 

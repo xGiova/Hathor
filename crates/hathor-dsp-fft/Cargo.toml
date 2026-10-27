@@ -10,6 +10,8 @@ description = "Realtime-safe FFT: powers-of-two complex + real transforms, setup
 
 [dev-dependencies]
 rustfft.workspace = true
+# The allocation guard tests need the core contract (AudioSection/serial patterns).
+hathor-dsp-core.workspace = true
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

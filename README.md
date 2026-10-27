@@ -29,10 +29,10 @@ share — which is why the lower layers expose it honestly.
 |---|---|---|---|---|
 | `crates/hathor-dsp-core` | realtime contract, buffers, node ABI, params, allocation guard | M0 | **implemented** | 20/20 (debug+release) |
 | `crates/hathor-dsp-filters` | RBJ biquads: f64 design, DF2T runtime, AVX2 kernel | M0–M1 | **implemented** | 27/27 (debug+release) |
-| `crates/hathor-dsp-fft` | complex/real FFT, STFT front-end | M1 | spec ([docs/modules/hathor-dsp-fft.md](docs/modules/hathor-dsp-fft.md)) | — |
-| `crates/hathor-dsp-measure` | level/correlation/time-alignment, masking meter | M1 | spec ([docs/modules/hathor-dsp-measure.md](docs/modules/hathor-dsp-measure.md)) | — |
-| `crates/hathor-host-graph` | node chain, scratch buffers, latency sum | M0–M5 | spec ([docs/modules/hathor-host-graph.md](docs/modules/hathor-host-graph.md)) | — |
-| `apps/hathor-audio-probe` | cpal/WASAPI harness, xrun & cycle benchmark | M0 | planned | — |
+| `crates/hathor-dsp-fft` | complex/real FFT, STFT front-end | M0–M1 | **implemented** (kernels; STFT front-end → M1) | 29/29 (debug+release) |
+| `crates/hathor-dsp-measure` | level/correlation/time-alignment, masking meter | M0–M1 | **implemented** (M0 API; masking → M1) | 54/54 (debug+release) |
+| `crates/hathor-host-graph` | node chain, scratch buffers, latency sum | M0–M5 | **implemented** (M0 Chain) | 12+1/12+1 (debug+release) |
+| `apps/hathor-audio-probe` | cpal/WASAPI harness, xrun & cycle benchmark | M0 | skeleton (build session next) | — |
 | `plugins/*` | EQ, Filter, SPAN-like, Compressor, Reverb, Delay, Saturator, kick↔bass phase-alignment plugin | M1–M4 | planned | — |
 | `crates/hathor-vst3-host` | C++ VST3 bridge (frozen ABI) | M5 | planned | — |
 | Channel-strip calibration & variance | `G_cal` gain-staging contract, seeded per-channel drift, sweet-spot meter | M6 | spec ([docs/modules/hathor-calibration-variance.md](docs/modules/hathor-calibration-variance.md)) | — |
