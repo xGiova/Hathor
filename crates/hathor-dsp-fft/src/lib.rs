@@ -39,17 +39,30 @@
 //! tolerances are the spec's 1e-4; where f32 accumulation makes a tolerance a
 //! judgement, the test says what it measured.
 //!
+//! ## 4. The bank is the FFT, four times, smoothed (M1)
+//!
+//! [`FftBank`] is the SPAN-style analyzer core: the doc's normative table — 256/1024/
+//! 4096/16384-sample tiers, each refreshing at N/4 — each with its ring, precomputed
+//! Hann, and `RealFftPlan`, their squared magnitudes spread over one **shared log
+//! axis** (default 1024 bins, 20 Hz–24 kHz) whose mapping weights are decided at
+//! setup. A bin's level is the max over the tiers — the mechanism that keeps the
+//! junction between tiers continuous in dB, tested against known sines at
+//! 100/500/4k/24k. `process` stays transcendental-free: the dB conversion the display
+//! wants is `render_db`, a display-thread call, not a callback one.
+//!
 //! ## What is NOT here (deliberately)
 //!
 //! No inverse real-FFT (M4 writes it with its first consumer — unconsumed code is
 //! untested code), no radix-4/split-radix (deferred to after the M0 benchmark), no
-//! SIMD (the probe measures the bank's real cost first), no multi-rate bank (M1).
+//! SIMD (the probe measures the bank's real cost first), no `Node` wrapper (the M1
+//! plugin wiring owns that; the bank's `process` is built to slot into it).
 
 #![warn(missing_docs)]
 // The "no unwrap" bans apply to production code, not to tests: in a test an
 // `.expect()` with a message documents better than a match (same carve-out as core).
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod bank;
 pub mod complex;
 pub mod plan;
 pub mod real;
@@ -57,6 +70,9 @@ pub mod real;
 #[cfg(test)]
 mod testsupport;
 
+pub use bank::{
+    BankParams, FftBank, TierTuning, AXIS_F_HI, AXIS_F_LO, DEFAULT_BINS, TIER_BANDS_HZ, TIER_SIZES,
+};
 pub use complex::Complex;
 pub use plan::{bin_freq, freq_bin, FftPlan};
 pub use real::RealFftPlan;

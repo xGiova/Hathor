@@ -53,3 +53,70 @@ pub fn tone(n: usize, k0: usize, amp: f32) -> Vec<Complex> {
 pub fn hann(j: usize, n: usize) -> f64 {
     0.5 - 0.5 * (std::f64::consts::TAU * j as f64 / n as f64).cos()
 }
+
+/// Sample `idx` of a full-scale sine at `freq` Hz: phase from the **absolute**
+/// sample index, so chunked driving never accumulates phase and the tone is
+/// exactly the one the analytic reference describes.
+pub fn sine_frame(freq: f32, idx: u64, sample_rate: f32) -> f32 {
+    (std::f64::consts::TAU * freq as f64 * idx as f64 / sample_rate as f64).sin() as f32
+}
+
+/// |X[k]| of the **Hann-windowed** frame, summed directly in f64:
+/// `|Σ w(j)·x(j)·e^{−2πikj/n}|`. The bank tests' independent reference — a bank
+/// expectation built on our own FFT would share its bugs the same way two copies
+/// of a wrong constant do. O(n) per bin, and every test calls it for a handful of
+/// bins, which is why the finest tier never appears in a full direct transform.
+pub fn direct_hann_bin(frame: &[f32], n: usize, k: usize) -> f64 {
+    assert_eq!(frame.len(), n, "the direct reference needs the full frame");
+    let mut re = 0.0f64;
+    let mut im = 0.0f64;
+    for (j, &x) in frame.iter().enumerate() {
+        let angle = -std::f64::consts::TAU * k as f64 * j as f64 / n as f64;
+        let w = hann(j, n);
+        let (s, c) = angle.sin_cos();
+        let y = x as f64 * w;
+        re += y * c;
+        im += y * s;
+    }
+    re.hypot(im)
+}
+
+/// Independent prediction for one shared log bin of one tier: the axis mapping
+/// (log position + two-point spread) re-derived here in f64, fed with direct-DFT
+/// bin magnitudes — never an FFT, never our kernel. The bank's cross-tier rule is
+/// applied by the caller as a max; this function is ONE tier.
+pub fn expected_tier_bin(
+    stream: &[f32],
+    tier_n: usize,
+    sample_rate: f32,
+    i: usize,
+    bins: usize,
+) -> f64 {
+    let norm = (4.0 / tier_n as f64).powi(2);
+    let frame = &stream[stream.len() - tier_n..];
+    let mut total = 0.0f64;
+    for k in 1..=tier_n / 2 {
+        let f = k as f64 * sample_rate as f64 / tier_n as f64;
+        if !(crate::bank::AXIS_F_LO as f64..=crate::bank::AXIS_F_HI as f64).contains(&f) {
+            continue;
+        }
+        let p = crate::bank::log_position(f, bins).clamp(0.0, (bins - 1) as f64);
+        let i0 = p as usize;
+        let frac = p - i0 as f64;
+        let (wi0, wi1) = if i0 + 1 < bins && frac > 0.0 {
+            (1.0 - frac, frac)
+        } else {
+            (1.0, 0.0)
+        };
+        let w = if i0 == i {
+            wi0
+        } else if i0 + 1 == i {
+            wi1
+        } else {
+            continue;
+        };
+        let x = direct_hann_bin(frame, tier_n, k);
+        total += x * x * norm * w;
+    }
+    total
+}

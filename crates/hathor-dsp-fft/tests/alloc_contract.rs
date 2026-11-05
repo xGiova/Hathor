@@ -1,6 +1,7 @@
-//! The realtime-contract proof for the FFT kernels (spec invariant 1):
-//! `FftPlan::new`/`RealFftPlan::new` are the only allocators, `process`/`inverse`/
-//! `RealFftPlan::process` never allocate.
+//! The realtime-contract proof for the FFT kernels and the M1 bank (spec
+//! invariant 1): `FftPlan::new`/`RealFftPlan::new`/`FftBank::new` are the only
+//! allocators, `process`/`inverse`/`RealFftPlan::process`/`FftBank::process` never
+//! allocate.
 //!
 //! Method, per CONVENTION §2.5 and the core guard: the test binary installs
 //! [`CheckedAllocator`], each run-phase test enters an [`AudioSection`] and asserts
@@ -173,4 +174,67 @@ fn the_guard_counts_an_ordinary_allocation() {
     };
     set_panic_on_audio_alloc(true);
     assert!(n >= 1, "the guard must see a grow-into allocation, got {n}");
+}
+
+/// The M1 invariant for the bank (spec invariant 1 in its multi-rate form):
+/// `FftBank::new` is the only allocation site; `process` never allocates — not
+/// even when a single call refreshes **all four tiers** (the 20480-frame block
+/// lands exactly on every tier's schedule). Values are asserted after the section
+/// and black-boxed through it: the release optimizer must not elide the FFTs the
+/// section was entered to guard (the lesson M0 already paid).
+#[test]
+fn bank_process_does_not_allocate_inside_an_audio_section() {
+    let _lock = serial();
+    reset_counters();
+    let mut bank = hathor_dsp_fft::FftBank::new(&hathor_dsp_fft::BankParams::new(48_000.0));
+    // Setup-side input memory: a deterministic 440 Hz sine, f64-exact phase.
+    let block: Vec<f32> = (0..20_480)
+        .map(|i| (std::f64::consts::TAU * 440.0 * i as f64 / 48_000.0).sin() as f32)
+        .collect();
+
+    let section = AudioSection::enter().expect("enter AudioSection");
+    // A plain 64-frame call (tier-256 refresh) and the all-tiers mega block —
+    // both must be allocation-free under the STRICT guard.
+    bank.process(black_box(&block[..64]));
+    bank.process(black_box(&block[64..]));
+    let allocs = section.allocs_here();
+    // Read (no allocate) so `black_box` keeps `bank` live across the count.
+    let peak_now = bank
+        .levels()
+        .iter()
+        .fold(0.0f32, |acc, &v| acc.max(black_box(v)));
+    drop(section);
+
+    assert_eq!(allocs, 0, "bank process allocated {allocs} times");
+    assert!(
+        peak_now > 0.01,
+        "the guarded work must be real: peak level {peak_now}"
+    );
+}
+
+/// Positive control 3 (measure mode): bank construction allocates visibly — the
+/// four plans, four rings, four Hanns, four maps and all smoothing state must
+/// show up in the counter, or the zero-claim above is vacuous for this type.
+#[test]
+fn bank_construction_allocations_are_visible_to_the_guard() {
+    let _lock = serial();
+    set_panic_on_audio_alloc(false);
+    reset_counters();
+    let n = {
+        let section = AudioSection::enter().expect("enter AudioSection");
+        let bank = black_box(hathor_dsp_fft::FftBank::new(&black_box(
+            hathor_dsp_fft::BankParams::new(48_000.0),
+        )));
+        let counted = section.allocs_here();
+        drop(bank);
+        counted
+    };
+    set_panic_on_audio_alloc(true);
+    // Four tiers × (plan tables + ring + hann + map + sm + hold) + scratch: the
+    // floor 20 is a sanity bound, not a byte-for-byte claim — exact counts move
+    // with the allocator's merge behavior, the contract is "many, at setup".
+    assert!(
+        n >= 20,
+        "FftBank::new must show its tables in the counter, got {n}"
+    );
 }
