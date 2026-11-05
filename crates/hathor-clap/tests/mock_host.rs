@@ -330,6 +330,7 @@ static DESCRIPTOR: clap_plugin_descriptor = hathor_clap::make_descriptor(
     clap_cstr!(""),
     clap_cstr!("0.1.0"),
     clap_cstr!("mock-host proxy consumer, allocation-free by construction"),
+    None, // the fixture declares no features; the analyzer's own table pins real ones
 );
 
 struct GainPlugin {

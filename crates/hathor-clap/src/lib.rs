@@ -91,7 +91,7 @@ pub mod __reexport {
 // `clap_cstr!` and `clap_entry!` are `#[macro_export]` macros: they land at this
 // crate's root automatically — no re-export line to write (or double-write).
 pub use cstr::read_padded_name;
-pub use descriptor::make_descriptor;
+pub use descriptor::{make_descriptor, FeatureList};
 pub use entry::is_initialized;
 pub use events::{InEvents, OutEvents, ParamUpdate};
 pub use host::{Host, LogSeverity};

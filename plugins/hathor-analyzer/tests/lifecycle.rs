@@ -390,13 +390,16 @@ fn analyzer_lifecycle_through_the_c_abi() {
     let d = unsafe { &*desc };
     assert_eq!(
         unsafe { CStr::from_ptr(d.id) },
-        clap_cstr!("com.hathor.analyzer")
+        clap_cstr!("dev.hathor.analyzer")
     );
     assert_eq!(
         unsafe { CStr::from_ptr(d.name) },
         clap_cstr!("Hathor Analyzer")
     );
-    assert!(d.features.is_null());
+    assert!(
+        !d.features.is_null(),
+        "the analyzer declares features; the whole table is pinned in the test below"
+    );
     assert!(unsafe { expect(&(*factory).get_plugin_descriptor)(factory, 1) }.is_null());
 
     let create = unsafe { expect(&(*factory).create_plugin) };
@@ -593,6 +596,57 @@ fn analyzer_lifecycle_through_the_c_abi() {
     assert!(
         !hathor_clap::is_initialized(),
         "entry flag clear after deinit"
+    );
+}
+
+/// The descriptor table IS the shipped identity: every string pinned
+/// byte-for-byte here, read through the factory exactly as a host scanning
+/// the library would. The `id` row is FOREVER-PINNED — hosts persist it into
+/// saved projects — so this test is the tripwire that makes a rename loud
+/// here instead of silently fatal in somebody's sessions.
+///
+/// This test deliberately does NOT call `init`/`deinit`: `get_factory` needs
+/// no entry flag (wrapper policy, audited in task-3), which keeps this a pure
+/// data-table check that can run in parallel with the lifecycle test.
+#[test]
+fn descriptor_ships_the_pinned_identity_byte_for_byte() {
+    let entry = &hathor_analyzer::clap_entry;
+    let get_factory = expect(&entry.get_factory);
+    let raw = unsafe { get_factory(CLAP_PLUGIN_FACTORY_ID.as_ptr()) };
+    assert!(!raw.is_null());
+    let factory: *const clap_plugin_factory = raw.cast();
+    let desc: *const clap_plugin_descriptor =
+        unsafe { expect(&(*factory).get_plugin_descriptor)(factory, 0) };
+    assert!(!desc.is_null());
+    // SAFETY: static in the plugin, alive for the library's life; the fields
+    // are `clap_cstr!` pointers by the wrapper's own contract.
+    let d = unsafe { &*desc };
+    let s = |p: *const c_char| -> String {
+        // SAFETY: every field reached here is a static NUL-terminated string.
+        unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+    };
+    assert_eq!(d.clap_version, CLAP_VERSION, "ABI version stamped first");
+    // id: forever. Editing the value below is a migration decision, not an
+    // edit — see the definition site in src/analyzer.rs.
+    assert_eq!(s(d.id), "dev.hathor.analyzer");
+    assert_eq!(s(d.name), "Hathor Analyzer");
+    assert_eq!(s(d.vendor), "Hathor");
+    assert_eq!(s(d.url), "https://github.com/xGiova/Hathor");
+    assert_eq!(s(d.manual_url), "https://github.com/xGiova/Hathor");
+    assert_eq!(s(d.support_url), "https://github.com/xGiova/Hathor");
+    assert_eq!(s(d.version), "0.1.0");
+    assert_eq!(
+        s(d.description),
+        "Multi-resolution spectrum analyzer (headless v0; GUI pending design)."
+    );
+    assert!(!d.features.is_null(), "features are declared, not stubbed");
+    // SAFETY: the shipped list is a static, NULL-terminated by construction.
+    let (f0, f1, term) = unsafe { (s(*d.features), s(*d.features.add(1)), *d.features.add(2)) };
+    assert_eq!(f0, "audio-effect");
+    assert_eq!(f1, "analyzer");
+    assert!(
+        term.is_null(),
+        "clap.h: the feature list ends with a null row"
     );
 }
 

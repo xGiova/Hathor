@@ -30,8 +30,8 @@ use core::ffi::CStr;
 use hathor_clap::sys::ext::params::CLAP_PARAM_IS_AUTOMATABLE;
 use hathor_clap::sys::plugin::clap_plugin_descriptor;
 use hathor_clap::{
-    clap_cstr, make_descriptor, AudioPortInfo, Host, InputStream, LogSeverity, OutputStream,
-    ParamInfo, ParamText, Plugin, ProcessStatus, ProcessView,
+    clap_cstr, make_descriptor, AudioPortInfo, FeatureList, Host, InputStream, LogSeverity,
+    OutputStream, ParamInfo, ParamText, Plugin, ProcessStatus, ProcessView,
 };
 
 use hathor_dsp_fft::bank::{BankParams, FftBank, TierTuning, DEFAULT_BINS};
@@ -262,15 +262,35 @@ fn sanitize(value: f64, index: usize) -> f64 {
     }
 }
 
+/// The plugin identity, PINNED FOREVER where it matters: `id` is persisted by
+/// hosts into saved projects, so renaming "dev.hathor.analyzer" breaks every
+/// session that carries it — the byte-for-byte test in `tests/lifecycle.rs`
+/// is the tripwire that makes such a rename loud, never silent.
+///
+/// URL fields: the GitHub repo is the only truthful address today; the README
+/// IS the manual for now, so `manual_url`/`support_url` reuse it rather than
+/// deep-linking docs that do not exist yet.
+///
+/// Features (clap-sys `plugin_features` constants, the spec's documented
+/// strings): audio effect + analyzer. Host-side handling of the list is
+/// expected-per-spec, NOT VERIFIED until the owner's Reaper scan.
 static DESCRIPTOR: clap_plugin_descriptor = make_descriptor(
-    clap_cstr!("com.hathor.analyzer"),
+    clap_cstr!("dev.hathor.analyzer"),
     clap_cstr!("Hathor Analyzer"),
     clap_cstr!("Hathor"),
-    clap_cstr!("https://hathor.local/analyzer"),
-    clap_cstr!(""),
-    clap_cstr!(""),
+    clap_cstr!("https://github.com/xGiova/Hathor"),
+    clap_cstr!("https://github.com/xGiova/Hathor"),
+    clap_cstr!("https://github.com/xGiova/Hathor"),
+    // Bump with the milestone tags (repo tag v0.1.0); the workspace crate
+    // version stays a 0.0.0 placeholder by lead decision — this string is the
+    // host-visible plugin version, not cargo's.
     clap_cstr!("0.1.0"),
-    clap_cstr!("SPAN-like multiresolution spectrum analyzer (headless v0, no GUI)"),
+    clap_cstr!("Multi-resolution spectrum analyzer (headless v0; GUI pending design)."),
+    Some(FeatureList::new(&[
+        hathor_clap::sys::plugin_features::CLAP_PLUGIN_FEATURE_AUDIO_EFFECT.as_ptr(),
+        hathor_clap::sys::plugin_features::CLAP_PLUGIN_FEATURE_ANALYZER.as_ptr(),
+        core::ptr::null(),
+    ])),
 );
 
 impl Plugin for AnalyzerPlugin {
