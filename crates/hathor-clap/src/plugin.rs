@@ -686,7 +686,10 @@ unsafe extern "C" fn tr_process<P: Plugin>(
         return crate::sys::process::CLAP_PROCESS_ERROR; // null process: host bug
     };
     let rate = inst.sample_rate_hz;
-    let mut view = ProcessView::from_sys(proc, rate);
+    // SAFETY: the vtable hands us the host's `clap_process` for the duration
+    // of this call — the CLAP contract is exactly `from_sys`'s safety
+    // requirement, and null process was already rejected above.
+    let mut view = unsafe { ProcessView::from_sys(proc, rate) };
     inst.plugin.process(&mut view).to_sys()
 }
 

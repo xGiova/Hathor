@@ -111,7 +111,18 @@ impl<'a> Ports<'a> {
 
 impl<'a> ProcessView<'a> {
     /// Wraps the host's `clap_process` for the duration of the call.
-    pub(crate) const fn from_sys(sys: &'a clap_process, sample_rate_hz: f64) -> Self {
+    ///
+    /// # Safety
+    /// The caller vouches for everything the CLAP contract vouches for a live
+    /// host: every raw field inside `sys` must describe a valid snapshot for
+    /// `'a` — buffer row pointers non-null and matching their declared
+    /// `channel_count`s, event lists well-formed or null, all of it alive and
+    /// stable for `'a` (for a real host: the duration of the callback). Inside
+    /// a host callback the wrapper discharges this from the vtable contract;
+    /// a test harness calling this OUTSIDE one (the reason it is public)
+    /// assumes the verification burden itself, exactly like the host would —
+    /// a mistyped `channel_count` here is UB downstream, not a panic.
+    pub const unsafe fn from_sys(sys: &'a clap_process, sample_rate_hz: f64) -> Self {
         Self {
             sys,
             sample_rate_hz,
@@ -360,7 +371,7 @@ mod tests {
         let mut h = fake(frames);
         let proc = leaked_process(&mut h, frames as u32);
         // SAFETY: `proc` is the box we just leaked; the borrow lasts until reclaim.
-        let mut view = ProcessView::from_sys(unsafe { &*proc }, 48_000.0);
+        let mut view = unsafe { ProcessView::from_sys(&*proc, 48_000.0) };
         {
             let mut block = view.output_block(0, 0).expect("one-channel block");
             block.channel(0)[0] = 1.0;
@@ -385,7 +396,7 @@ mod tests {
         h.in_ptrs[1] = core::ptr::null_mut(); // a port that lies: one null channel
         let proc = leaked_process(&mut h, 32);
         // SAFETY: test-owned leak; borrowed then reclaimed below.
-        let view = ProcessView::from_sys(unsafe { &*proc }, 48_000.0);
+        let view = unsafe { ProcessView::from_sys(&*proc, 48_000.0) };
         assert!(
             view.input_channel(0, 1).is_none(),
             "a null channel pointer reads as None, never as a slice"
@@ -406,7 +417,7 @@ mod tests {
         let mut h = fake(64);
         let proc = leaked_process(&mut h, 64);
         // SAFETY: test-owned leak; borrowed then reclaimed below.
-        let view = ProcessView::from_sys(unsafe { &*proc }, 48_000.0);
+        let view = unsafe { ProcessView::from_sys(&*proc, 48_000.0) };
         let ctx = view.ctx();
         assert_eq!(ctx.sample_rate, 48_000);
         assert_eq!(ctx.frames, 64);
@@ -446,7 +457,7 @@ mod tests {
         // SAFETY: our own leak; we patch the transport pointer before borrowing.
         unsafe { (*p).transport = core::ptr::from_ref(transport).cast() };
         // SAFETY: test-owned leak; borrowed then reclaimed below.
-        let view = ProcessView::from_sys(unsafe { &*p }, 48_000.0);
+        let view = unsafe { ProcessView::from_sys(&*p, 48_000.0) };
         let t = view.transport_snapshot().expect("flags say it has data");
         assert!(t.playing);
         assert_eq!(t.tempo_bpm, Some(120.0));
@@ -464,7 +475,7 @@ mod tests {
         h.out_buf.data32 = h.out_ptrs.as_mut_ptr();
         let proc = leaked_process(&mut h, 16);
         // SAFETY: test-owned leak; borrowed then reclaimed below.
-        let view = ProcessView::from_sys(unsafe { &*proc }, 48_000.0);
+        let view = unsafe { ProcessView::from_sys(&*proc, 48_000.0) };
         assert!(
             view.out_aliases_in(),
             "the consumer must learn in-place pairs instead of fighting UB"
@@ -475,7 +486,7 @@ mod tests {
         let mut h2 = fake(16);
         let proc2 = leaked_process(&mut h2, 16);
         // SAFETY: second test-owned leak; borrowed then reclaimed below.
-        let view2 = ProcessView::from_sys(unsafe { &*proc2 }, 48_000.0);
+        let view2 = unsafe { ProcessView::from_sys(&*proc2, 48_000.0) };
         assert!(
             !view2.out_aliases_in(),
             "separate in/out arrays of separate buffers are not an alias"

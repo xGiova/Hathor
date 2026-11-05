@@ -20,10 +20,11 @@
 //! mine".
 //!
 //! [`clap_entry!`] keeps the whole crate free of name collisions: it generates a
-//! module around the user's chosen identifier, and every static (`CLAP_ENTRY`,
-//! `CLAP_FACTORY`, descriptor) lives inside it. The consumer's plugin binary
-//! still exports exactly one symbol: `clap_entry` (`#[no_mangle]` stays the
-//! plugin task's decision, since a `cdylib` can also carry other entries).
+//! module around the user's chosen identifier, and everything — the entry
+//! static (emitted `#[no_mangle] pub static clap_entry` by value, the one
+//! symbol a host `dlsym`s), the factory, the descriptor wiring — lives inside
+//! it. The exported name is fixed by the ABI, so exactly one `clap_entry!`
+//! call per crate: twice is a link error, by design.
 
 use core::ffi::{c_char, CStr};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -93,15 +94,18 @@ pub fn is_initialized() -> bool {
 ///
 /// ```ignore
 /// clap_entry!(pub my_analyzer, MyAnalyzer);
-/// // then, in a `cdylib` crate:
-/// #[no_mangle]
-/// pub static clap_entry: hathor_clap::sys::entry::clap_plugin_entry = my_analyzer::CLAP_ENTRY;
+/// // that is the whole wiring: the macro itself emits, inside the module,
+/// // `#[no_mangle] pub static clap_entry` — the by-value `clap_plugin_entry`
+/// // a host's `dlsym("clap_entry")` resolves. Reach for it in Rust paths as
+/// // `my_analyzer::clap_entry` (re-export at the crate root if you like).
 /// ```
 ///
-/// The module exposes `CLAP_ENTRY` (the `clap_plugin_entry` vtable) plus the
-/// factory and descriptor wiring that point at `<$plugin as Plugin>::DESCRIPTOR`.
-/// All names the macro needs are `$crate`-qualified, so nothing collides with the
-/// consumer's namespace; `pub use` of the module is the consumer's choice.
+/// The module exposes `clap_entry` (the vtable, exported at the C symbol of
+/// the same name) plus the factory and descriptor wiring that point at
+/// `<$plugin as Plugin>::DESCRIPTOR`. All names the macro needs are
+/// `$crate`-qualified, so nothing collides with the consumer's namespace;
+/// `pub use` of the module is the consumer's choice. Exactly one macro call
+/// per crate: the exported symbol name is fixed.
 #[macro_export]
 macro_rules! clap_entry {
     ($vis:vis $module:ident, $plugin:ty) => {
@@ -178,9 +182,16 @@ macro_rules! clap_entry {
                 create_plugin: Some(create_plugin),
             };
 
-            /// The entry vtable: give this to the host as `clap_entry` from your
-            /// `cdylib` (`#[no_mangle] pub static clap_entry = …::CLAP_ENTRY;`).
-            pub static CLAP_ENTRY: clap_plugin_entry = clap_plugin_entry {
+            /// The entry vtable the host resolves as the symbol `clap_entry`.
+            ///
+            /// Emitted **by value under that exact name** with `#[no_mangle]`:
+            /// this is what a host's `dlsym(handle, "clap_entry")` must land
+            /// on. The symbol name is fixed, so one crate gets one
+            /// `clap_entry!` call — calling it twice is a link error, by
+            /// design (one library, one entry). Re-export the module (or the
+            /// static) wherever the crate wants it visible in Rust paths.
+            #[no_mangle]
+            pub static clap_entry: clap_plugin_entry = clap_plugin_entry {
                 clap_version: CLAP_VERSION,
                 init: Some(init),
                 deinit: Some(deinit),

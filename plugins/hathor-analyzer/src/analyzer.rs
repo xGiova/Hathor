@@ -212,8 +212,12 @@ impl AnalyzerPlugin {
         self.params
     }
 
-    /// The one core both paths share: guards, downmix into the `activate`-sized
-    /// scratch, feed the bank. Allocation-free; no raw pointers anywhere.
+    /// The DSP core the host-facing [`Plugin::process`] adapter calls after its
+    /// pass-through: guards, downmix into the `activate`-sized scratch, feed
+    /// the bank. Allocation-free, plain slices only. The tests drive the full
+    /// adapter (this plus the pass-through) through a fabricated
+    /// `ProcessView` — `from_sys` is public since task-5 — so there is exactly
+    /// one audio path under test, the host one.
     fn downmix_and_analyze(&mut self, l: &[f32], r: Option<&[f32]>) -> ProcessStatus {
         if !self.active {
             return ProcessStatus::Error;
@@ -244,45 +248,6 @@ impl AnalyzerPlugin {
         };
         bank.process(&self.mono[..frames]);
         ProcessStatus::Continue
-    }
-
-    /// The audio core in safe slice terms: copy `l` (and `r`) to the given
-    /// outputs **bit-exactly** when the host handed us distinct buffers
-    /// (`Some` outputs; `None` = in-place, already there), downmix
-    /// `0.5·(L+R)` (or the lone `l` when `r` is `None`), and feed the bank.
-    ///
-    /// This seam exists because the wrapper's `ProcessView::from_sys` is
-    /// `pub(crate)` (reported wrapper gap): a consumer crate cannot fabricate
-    /// a view for a direct DSP test. The host-facing [`Plugin::process`] runs
-    /// THE SAME `downmix_and_analyze` core; its pass-through differs only in
-    /// borrow choreography (the view hands out one output row at a time). The
-    /// spectrum proofs here exercise identical arithmetic with no raw pointers.
-    pub fn process_audio(
-        &mut self,
-        l: &[f32],
-        r: Option<&[f32]>,
-        mut out0: Option<&mut [f32]>,
-        mut out1: Option<&mut [f32]>,
-    ) -> ProcessStatus {
-        if !self.active {
-            return ProcessStatus::Error;
-        }
-        let frames = l.len();
-        if out0.as_deref().is_some_and(|o| o.len() != frames)
-            || out1.as_deref().is_some_and(|o| o.len() != frames)
-        {
-            return ProcessStatus::Error;
-        }
-        if let Some(o) = out0.as_mut() {
-            o.copy_from_slice(l);
-        }
-        if let Some(o) = out1.as_mut() {
-            match r {
-                Some(rr) => o.copy_from_slice(rr),
-                None => o.fill(0.0), // stereo out, mono in: silent right (documented v0)
-            }
-        }
-        self.downmix_and_analyze(l, r)
     }
 }
 
@@ -364,10 +329,16 @@ impl Plugin for AnalyzerPlugin {
 
     /// Thin adapter: pull the CLAP rows into slices, run the pass-through
     /// (row by row — the view hands out one mutable row at a time), then the
-    /// shared [`Self::downmix_and_analyze`] core. All the audio math lives
-    /// there, provable without raw pointers.
+    /// shared [`Self::downmix_and_analyze`] core. This is THE audio path: the
+    /// spectrum tests fabricate a `clap_process` and drive exactly this.
     fn process(&mut self, io: &mut ProcessView<'_>) -> ProcessStatus {
         if !self.active {
+            return ProcessStatus::Error;
+        }
+        if io.frames() > self.mono.len() {
+            // Host exceeded the max block promised at `activate` (spec
+            // violation; hosts expected NOT VERIFIED): refuse BEFORE writing
+            // anything, so a failed block is at least an untouched block.
             return ProcessStatus::Error;
         }
         let in_ch = match io.port_channels(0, true) {
@@ -502,6 +473,49 @@ impl Plugin for AnalyzerPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hathor_clap::sys::audio_buffer::clap_audio_buffer;
+    use hathor_clap::sys::process::clap_process;
+
+    /// Drive the REAL `Plugin::process` adapter: fabricate a well-formed
+    /// `clap_process` (the host's guarantees, emulated) and run the view over
+    /// it — exactly the object a host hands the wrapper during a callback.
+    pub(super) fn drive(
+        p: &mut AnalyzerPlugin,
+        in_ptrs: &mut [*mut f32],
+        out_ptrs: &mut [*mut f32],
+        frames: u32,
+    ) -> ProcessStatus {
+        let in_buf = clap_audio_buffer {
+            data32: in_ptrs.as_mut_ptr(),
+            data64: core::ptr::null_mut(),
+            channel_count: in_ptrs.len() as u32,
+            latency: 0,
+            constant_mask: 0,
+        };
+        let mut out_buf = clap_audio_buffer {
+            data32: out_ptrs.as_mut_ptr(),
+            data64: core::ptr::null_mut(),
+            channel_count: out_ptrs.len() as u32,
+            latency: 0,
+            constant_mask: 0,
+        };
+        let proc = clap_process {
+            steady_time: 0,
+            frames_count: frames,
+            transport: core::ptr::null(),
+            audio_inputs: &raw const in_buf,
+            audio_outputs: &raw mut out_buf,
+            audio_inputs_count: 1,
+            audio_outputs_count: 1,
+            in_events: core::ptr::null(),
+            out_events: core::ptr::null(),
+        };
+        // SAFETY: every field is well-formed for the duration of this call:
+        // the row arrays sit in the callers' live buffers, the channel counts
+        // match the array lengths, `frames` matches the slices the rows back.
+        let mut view = unsafe { ProcessView::from_sys(&proc, 48_000.0) };
+        p.process(&mut view)
+    }
 
     #[test]
     fn defaults_mirror_the_bank_profile_exactly() {
@@ -597,12 +611,17 @@ mod tests {
             })
         };
         for b in 0..24 {
-            let l = tone(b * 64);
+            let mut l = tone(b * 64);
+            let keep = l;
             let mut o0 = [7.0f32; 64];
             let mut o1 = [7.0f32; 64];
-            let st = p.process_audio(&l, None, Some(&mut o0), Some(&mut o1));
-            assert!(matches!(st, ProcessStatus::Continue));
-            assert_eq!(o0, l, "mono in: left passes through");
+            let mut in_ptrs = [l.as_mut_ptr()];
+            let mut out_ptrs = [o0.as_mut_ptr(), o1.as_mut_ptr()];
+            assert!(matches!(
+                drive(&mut p, &mut in_ptrs, &mut out_ptrs, 64),
+                ProcessStatus::Continue
+            ));
+            assert_eq!(o0, keep, "mono in: left passes through");
             assert!(
                 o1.iter().all(|&x| x == 0.0),
                 "stereo out, mono in: right goes silent"
@@ -611,6 +630,25 @@ mod tests {
         assert!(
             p.levels().iter().any(|&x| x > 0.0),
             "the lone channel is the downmix, not silence"
+        );
+    }
+
+    #[test]
+    fn oversized_block_is_refused_before_any_write() {
+        let mut p = AnalyzerPlugin::instantiate();
+        assert!(p.activate(48_000.0, 16, 64));
+        let mut big = [0.5f32; 65];
+        let mut o0 = [7.0f32; 65];
+        let mut in_ptrs = [big.as_mut_ptr()];
+        let mut out_ptrs = [o0.as_mut_ptr()];
+        // 65 frames > the 64-frame scratch promised at `activate`.
+        assert!(matches!(
+            drive(&mut p, &mut in_ptrs, &mut out_ptrs, 65),
+            ProcessStatus::Error
+        ));
+        assert!(
+            o0.iter().all(|&x| x == 7.0),
+            "the failed block touched nothing"
         );
     }
 }

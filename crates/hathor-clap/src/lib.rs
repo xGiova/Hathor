@@ -55,8 +55,9 @@
 //! struct MyPlugin;            // impl hathor_clap::Plugin — safe Rust only
 //! static DESC: clap_plugin_descriptor = hathor_clap::make_descriptor(…);
 //! hathor_clap::clap_entry!(my_entry, MyPlugin);
-//! #[no_mangle]
-//! pub static clap_entry: hathor_clap::sys::entry::clap_plugin_entry = my_entry::CLAP_ENTRY;
+//! // that's the complete wiring: the macro itself emits the
+//! // `#[no_mangle] pub static clap_entry` the host resolves; add
+//! // `pub use my_entry::clap_entry;` if the crate wants the Rust path too.
 //! ```
 
 #![warn(missing_docs)]

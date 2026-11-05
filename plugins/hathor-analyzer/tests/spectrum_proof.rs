@@ -1,22 +1,64 @@
-//! DSP proofs for the analyzer, driven through the safe `process_audio` seam
-//! (the wrapper's `Plugin::process` is a thin adapter onto exactly this
-//! arithmetic — the C ABI path is `lifecycle.rs`'s job): the bank's output
-//! must light the bin an INDEPENDENT oracle predicts, the downmix must be
-//! `0.5·(L+R)`, and pass-through must stay bit-exact under distinct channels.
-//!
-//! The oracle re-derives the bank's math in f64 (a direct Hann DFT over the
-//! exact last frame + the log-axis spread + the cross-tier max), the pattern
-//! `hathor-dsp-fft`'s own tests use. Never our FFT, never our mapping tables —
-//! two copies of a wrong constant share bugs, an independent sum does not.
+//! DSP proofs for the analyzer, driven through the REAL host path:
+//! a fabricated `clap_process` wrapped by `ProcessView::from_sys` (public with
+//! documented safety since task-5) straight into `Plugin::process`. There is
+//! exactly ONE audio path under test — the one a host hits — and the spectrum
+//! oracle below stays independent of it (direct f64 Hann DFT, log-axis spread
+//! and cross-tier max re-derived here, the pattern `hathor-dsp-fft`'s tests
+//! use: never our FFT, never our mapping tables — two copies of a wrong
+//! constant share bugs, an independent sum does not).
 
 use hathor_analyzer::AnalyzerPlugin;
-use hathor_clap::Plugin;
+use hathor_clap::sys::audio_buffer::clap_audio_buffer;
+use hathor_clap::sys::process::clap_process;
+use hathor_clap::{Plugin, ProcessStatus, ProcessView};
 
 const SR: f64 = 48_000.0;
 const BINS: usize = 1024; // DEFAULT_BINS, re-stated: the oracle must not import the bank.
 const F_TONE: f64 = 984.375; // bin 21 of the 1024 tier at 48 kHz, exactly
 const AXIS_LO: f64 = 20.0;
 const AXIS_HI: f64 = 24_000.0;
+
+/// Drive one block through the real adapter. `in_ptrs`/`out_ptrs` are rows
+/// (1 or 2 channels each); pass the same row into both lists to simulate the
+/// in-place pair a host performs.
+fn drive(
+    p: &mut AnalyzerPlugin,
+    in_ptrs: &mut [*mut f32],
+    out_ptrs: &mut [*mut f32],
+    frames: u32,
+) -> ProcessStatus {
+    let in_buf = clap_audio_buffer {
+        data32: in_ptrs.as_mut_ptr(),
+        data64: core::ptr::null_mut(),
+        channel_count: in_ptrs.len() as u32,
+        latency: 0,
+        constant_mask: 0,
+    };
+    let mut out_buf = clap_audio_buffer {
+        data32: out_ptrs.as_mut_ptr(),
+        data64: core::ptr::null_mut(),
+        channel_count: out_ptrs.len() as u32,
+        latency: 0,
+        constant_mask: 0,
+    };
+    let proc = clap_process {
+        steady_time: 0,
+        frames_count: frames,
+        transport: core::ptr::null(),
+        audio_inputs: &raw const in_buf,
+        audio_outputs: &raw mut out_buf,
+        audio_inputs_count: 1,
+        audio_outputs_count: 1,
+        in_events: core::ptr::null(),
+        out_events: core::ptr::null(),
+    };
+    // SAFETY: this test IS the host here, and it vouches for exactly what the
+    // CLAP contract vouches for: the rows back `frames` f32 samples, the
+    // arrays match the declared channel counts, everything lives until
+    // `drive` returns.
+    let mut view = unsafe { ProcessView::from_sys(&proc, SR) };
+    p.process(&mut view)
+}
 
 fn log_position(f: f64, bins: usize) -> f64 {
     (f / AXIS_LO).ln() / (AXIS_HI / AXIS_LO).ln() * (bins - 1) as f64
@@ -107,15 +149,19 @@ fn a_known_sine_lights_the_bin_the_oracle_predicts() {
     let mut p = activated_bypass();
     let mut stream: Vec<f32> = Vec::with_capacity(24 * 64);
     for b in 0..24 {
-        let s = tone_frame(b * 64);
-        // L and R carry the identical tone: `0.5*(x + x)` is `x` bit-exact in
-        // f32, so `stream` is exactly what the bank saw.
+        let mut in0 = tone_frame(b * 64);
+        let mut in1 = in0; // identical tone both ears; 0.5*(x+x) is x bit-exact
+        let keep = in0;
         let (mut o0, mut o1) = ([0.0f32; 64], [0.0f32; 64]);
-        let st = p.process_audio(&s, Some(&s), Some(&mut o0), Some(&mut o1));
-        assert!(matches!(st, hathor_clap::ProcessStatus::Continue));
-        assert_eq!(o0, s, "pass-through bit-exact even here");
-        assert_eq!(o1, s);
-        stream.extend_from_slice(&s);
+        let mut in_ptrs = [in0.as_mut_ptr(), in1.as_mut_ptr()];
+        let mut out_ptrs = [o0.as_mut_ptr(), o1.as_mut_ptr()];
+        assert!(matches!(
+            drive(&mut p, &mut in_ptrs, &mut out_ptrs, 64),
+            ProcessStatus::Continue
+        ));
+        assert_eq!(o0, keep, "pass-through bit-exact even here");
+        assert_eq!(o1, keep);
+        stream.extend_from_slice(&keep);
     }
     p.render_db();
     let db = p.db();
@@ -162,11 +208,14 @@ fn silence_sits_exactly_at_the_floor_param() {
     p.set_param_value(0, -40.0); // Floor
     assert!(p.activate(SR, 64, 64));
     for _ in 0..24 {
-        let in0 = [0.0f32; 64];
-        let in1 = [0.0f32; 64];
+        let (mut in0, mut in1) = ([0.0f32; 64], [0.0f32; 64]);
         let (mut o0, mut o1) = ([-3.0f32; 64], [-3.0f32; 64]);
-        let st = p.process_audio(&in0, Some(&in1), Some(&mut o0), Some(&mut o1));
-        assert!(matches!(st, hathor_clap::ProcessStatus::Continue));
+        let mut in_ptrs = [in0.as_mut_ptr(), in1.as_mut_ptr()];
+        let mut out_ptrs = [o0.as_mut_ptr(), o1.as_mut_ptr()];
+        assert!(matches!(
+            drive(&mut p, &mut in_ptrs, &mut out_ptrs, 64),
+            ProcessStatus::Continue
+        ));
     }
     p.render_db();
     assert!(
@@ -181,11 +230,15 @@ fn downmix_is_the_average_not_a_channel_pick() {
     // would light the tone; correct 0.5*(L+R) math keeps it silent.
     let mut p = activated_bypass();
     for b in 0..24 {
-        let s = tone_frame(b * 64);
-        let neg: [f32; 64] = core::array::from_fn(|i| -s[i]);
+        let mut in0 = tone_frame(b * 64);
+        let mut in1: [f32; 64] = core::array::from_fn(|i| -in0[i]);
         let (mut o0, mut o1) = ([0.0f32; 64], [0.0f32; 64]);
-        let st = p.process_audio(&s, Some(&neg), Some(&mut o0), Some(&mut o1));
-        assert!(matches!(st, hathor_clap::ProcessStatus::Continue));
+        let mut in_ptrs = [in0.as_mut_ptr(), in1.as_mut_ptr()];
+        let mut out_ptrs = [o0.as_mut_ptr(), o1.as_mut_ptr()];
+        assert!(matches!(
+            drive(&mut p, &mut in_ptrs, &mut out_ptrs, 64),
+            ProcessStatus::Continue
+        ));
     }
     assert!(
         p.levels().iter().all(|&x| x == 0.0),
@@ -214,8 +267,12 @@ fn pass_through_keeps_distinct_channels_bit_exact() {
         let keep0 = bytes(&in0);
         let keep1 = bytes(&in1);
         let (mut o0, mut o1) = ([9.0f32; 64], [-9.0f32; 64]);
-        let st = p.process_audio(&in0, Some(&in1), Some(&mut o0), Some(&mut o1));
-        assert!(matches!(st, hathor_clap::ProcessStatus::Continue));
+        let mut in_ptrs = [in0.as_mut_ptr(), in1.as_mut_ptr()];
+        let mut out_ptrs = [o0.as_mut_ptr(), o1.as_mut_ptr()];
+        assert!(matches!(
+            drive(&mut p, &mut in_ptrs, &mut out_ptrs, 64),
+            ProcessStatus::Continue
+        ));
         // Exact bit equality over raw bytes: an identity, not a comparison.
         assert_eq!(bytes(&o0), keep0, "channel 0 identity over random blocks");
         assert_eq!(bytes(&o1), keep1, "channel 1 identity over random blocks");
@@ -228,11 +285,21 @@ fn pass_through_keeps_distinct_channels_bit_exact() {
 fn in_place_mode_skips_the_copy_but_still_analyzes() {
     let mut p = activated_bypass();
     for b in 0..24 {
-        let s = tone_frame(b * 64);
-        let n = s;
-        // Host gave the same rows for in and out: no output arguments at all.
-        let st = p.process_audio(&s, Some(&n), None, None);
-        assert!(matches!(st, hathor_clap::ProcessStatus::Continue));
+        let mut in0 = tone_frame(b * 64);
+        let mut in1 = in0;
+        let keep = in0;
+        // The host hands the SAME rows to in and out (the advertised pair):
+        // the adapter must detect the alias and refuse to double-write.
+        let mut in_ptrs = [in0.as_mut_ptr(), in1.as_mut_ptr()];
+        let mut out_ptrs = [in0.as_mut_ptr(), in1.as_mut_ptr()];
+        assert!(matches!(
+            drive(&mut p, &mut in_ptrs, &mut out_ptrs, 64),
+            ProcessStatus::Continue
+        ));
+        assert_eq!(
+            in0, keep,
+            "in-place rows untouched: pass-through holds trivially"
+        );
     }
     assert!(
         p.levels().iter().any(|&x| x > 0.0),
@@ -241,27 +308,47 @@ fn in_place_mode_skips_the_copy_but_still_analyzes() {
 }
 
 #[test]
-fn refuses_when_not_active_or_oversized() {
+fn refuses_when_not_active_oversized_or_broken() {
     let mut p = AnalyzerPlugin::instantiate();
-    let i = [0.5f32; 64];
-    let mut o = [0.0f32; 64];
-    assert!(matches!(
-        p.process_audio(&i, Some(&i), Some(&mut o), None),
-        hathor_clap::ProcessStatus::Error
-    ));
+    let mut in0 = [0.5f32; 64];
+    let mut o0 = [0.0f32; 64];
+    let mut in_ptrs = [in0.as_mut_ptr()];
+    let mut out_ptrs = [o0.as_mut_ptr()];
+    assert!(
+        matches!(
+            drive(&mut p, &mut in_ptrs, &mut out_ptrs, 64),
+            ProcessStatus::Error
+        ),
+        "no activate yet"
+    );
     assert!(p.activate(SR, 64, 64));
-    // 65 frames > the 64-frame scratch promised at activate: refused, not UB.
-    let big = [0.5f32; 65];
-    let mut bo = [0.0f32; 65];
+    // 65 frames > the 64-frame scratch: Error, outputs untouched.
+    let mut big = [0.5f32; 65];
+    let mut bo = [7.0f32; 65];
+    let mut big_in = [big.as_mut_ptr()];
+    let mut big_out = [bo.as_mut_ptr()];
     assert!(matches!(
-        p.process_audio(&big, None, Some(&mut bo), None),
-        hathor_clap::ProcessStatus::Error
+        drive(&mut p, &mut big_in, &mut big_out, 65),
+        ProcessStatus::Error
     ));
-    // Mismatched right-channel length: refused.
-    let short = [0.5f32; 32];
-    let mut oo = [0.0f32; 64];
+    assert!(
+        bo.iter().all(|&x| x == 7.0),
+        "a refused block writes nothing"
+    );
+    // A null output row (a host lying about its buffers): Error, no UB.
+    let mut null_out = [core::ptr::null_mut()];
     assert!(matches!(
-        p.process_audio(&i, Some(&short), Some(&mut oo), None),
-        hathor_clap::ProcessStatus::Error
+        drive(&mut p, &mut in_ptrs, &mut null_out, 64),
+        ProcessStatus::Error
     ));
+    // Deactivated: Error again.
+    p.deactivate();
+    assert!(matches!(
+        drive(&mut p, &mut in_ptrs, &mut out_ptrs, 64),
+        ProcessStatus::Error
+    ));
+    assert!(
+        p.levels().is_empty() && p.db().is_empty(),
+        "views empty when no bank"
+    );
 }

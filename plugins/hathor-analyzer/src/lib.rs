@@ -24,30 +24,26 @@
 //! The plugin logic (`analyzer.rs`) is pure safe Rust: it never touches a raw
 //! pointer, never allocates in `process` (scratch buffers are sized in
 //! `activate`), and pointer ownership during a callback belongs to the wrapper
-//! (see `hathor_clap`'s module headers). The only `unsafe` in this crate is the
-//! hand-wired `extern "C"` entry shims in [`clapabi`], which forward to
-//! audited wrapper functions — each raw operation sits in an explicit
-//! `unsafe { }` with a SAFETY comment (the crate denies
-//! `unsafe_op_in_unsafe_fn`).
+//! (see `hathor_clap`'s module headers). The only `unsafe` outside of tests is
+//! the `clap_entry!` expansion below — wrapper-generated code, audited inside
+//! `hathor-clap` itself.
 //!
-//! ## Why the entry is hand-wired (wrapper gap, reported to the lead)
+//! ## The exported symbol
 //!
-//! `hathor_clap::clap_entry!` generates a module holding a `pub static
-//! CLAP_ENTRY`. A host resolves the *symbol* `clap_entry` and reinterprets its
-//! address as `const clap_plugin_entry` — the struct must exist **by value at
-//! that symbol**, and Rust cannot copy one static into another's initializer.
-//! So `clapabi` below builds the same table from the wrapper's public audited
-//! pieces (`entry::init_impl`, `entry::deinit_impl`, `entry::factory_for`,
-//! `plugin::create_instance`) and exports it by value. No wrapper logic is
-//! bypassed or duplicated beyond that wiring; the gap and a suggested macro
-//! shape were reported to the lead.
+//! `hathor_clap::clap_entry!` (fixed for exactly this in task-5) emits the
+//! `#[no_mangle] pub static clap_entry` **by value** — what a host's
+//! `dlsym(handle, "clap_entry")` must land on. Nothing is hand-wired in this
+//! crate anymore; the re-export below only makes the generated static
+//! reachable as `hathor_analyzer::clap_entry` for the tests.
 //!
 //! ## Honest status
 //!
-//! The lifecycle proof here is the mock-host proxy (tests/lifecycle.rs): real
-//! loading in Reaper is an OWNER step — the artifact recipe is in the report.
-//! Host-behavior assumptions (buffer lifetimes, call order, the in-place pair
-//! promise) are *expected per spec, NOT VERIFIED in real hosts*.
+//! The lifecycle proof here is the mock-host proxy (tests/lifecycle.rs); the
+//! binary carries stronger evidence (task-4 report: `dumpbin /exports` shows
+//! the symbol at ordinal 1). Real loading in Reaper is an OWNER step — the
+//! artifact recipe is in the report to the lead. Host-behavior assumptions
+//! (buffer lifetimes, call order, the in-place pair promise) are *expected per
+//! spec, NOT VERIFIED in real hosts*.
 
 #![warn(missing_docs)]
 #![cfg_attr(
@@ -56,10 +52,15 @@
 )]
 
 mod analyzer;
-mod clapabi;
 
 pub use analyzer::{
     AnalyzerPlugin, ParamSpec, PARAM_AVG_TIERS, PARAM_COUNT, PARAM_DECAY_TIERS, PARAM_FLOOR_DB,
     SPECS,
 };
-pub use clapabi::clap_entry;
+
+// One macro call per crate: the wrapper generates the entry module, exports
+// `#[no_mangle] pub static clap_entry` by value, and wires the one-plugin
+// factory to `AnalyzerPlugin::DESCRIPTOR` through audited wrapper code only.
+hathor_clap::clap_entry!(entry_gen, AnalyzerPlugin);
+
+pub use entry_gen::clap_entry;

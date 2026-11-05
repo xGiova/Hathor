@@ -612,12 +612,19 @@ fn sine_pair(i: usize) -> (f32, f32) {
 #[test]
 fn mock_host_full_lifecycle_and_alloc_contract() {
     fill_flush_events();
-    let entry = &generated::CLAP_ENTRY;
+    let entry = &generated::clap_entry;
 
     // 1. entry version handshake, like every real host does first.
     assert!(
         clap_version_is_compatible(entry.clap_version),
         "the entry advertises a CLAP version the host (us) understands"
+    );
+    // 1b. the by-value proof field by field: the exported static IS the whole
+    // vtable — version stamped, every slot wired to a generated wrapper fn.
+    assert_eq!(entry.clap_version, hathor_clap::sys::version::CLAP_VERSION);
+    assert!(
+        entry.init.is_some() && entry.deinit.is_some() && entry.get_factory.is_some(),
+        "no hole in the generated table"
     );
 
     // 2. init / double-init refusal (documented wrapper policy).
