@@ -24,10 +24,13 @@ you when, eight months from now, you no longer remember why a thing is the way i
 
 ## If you need **one specific module** → [modules/](modules/)
 
-Every module has its own MD with the same structure:
-`Purpose · How it works · Invariants (the rules that bite when violated) · Acceptance
-criteria · Rust concepts it uses · DSP concepts it embodies · What is deferred and why ·
-Exercises.`
+Every module has its own MD with the same core parts:
+`what/why · contract or how-it-works · Invariants (the rules that bite when violated) ·
+Verification / acceptance · Rust & DSP concepts where they earn their place · what is
+deferred and why · honesty about claims.`
+Section names evolve with the module's job — an app doc, a contract doc and a library spec
+are not twins (the softening itself: owner decision, 2026-11-05, after the probe and
+`hathor-clap` docs proved the old fixed list too narrow).
 
 | Module | Status | Document |
 |---|---|---|
@@ -36,6 +39,7 @@ Exercises.`
 | `hathor-dsp-fft` | written, tested (kernels + M1 bank: 36 lib + 7 contract, 2 bench ignored) | [modules/hathor-dsp-fft.md](modules/hathor-dsp-fft.md) |
 | `hathor-dsp-measure` | written, tested | [modules/hathor-dsp-measure.md](modules/hathor-dsp-measure.md) |
 | `hathor-host-graph` | written, tested (M0 Chain) | [modules/hathor-host-graph.md](modules/hathor-host-graph.md) |
+| `hathor-clap` | written, tested 27 (24 unit + 2 integration + 1 doctest; real-host load = owner step) | [modules/hathor-clap.md](modules/hathor-clap.md) |
 | gain staging & channel variance (M6 contract, policy not crate) | spec | [modules/hathor-calibration-variance.md](modules/hathor-calibration-variance.md) |
 | `hathor-nam` (accepted draft, crate not yet created; gated G5) | draft spec (M6.5) | [modules/hathor-nam.md](modules/hathor-nam.md) |
 | `hathor-audio-probe` | written, tested | [modules/hathor-audio-probe.md](modules/hathor-audio-probe.md) |

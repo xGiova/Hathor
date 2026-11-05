@@ -24,7 +24,7 @@ allowed to say "measured".
 
 ## Command line
 
-std-only parser (`cli.rs`), no dependency on a clap-like crate; strict about what it accepts.
+std-only parser (`cli.rs`), no CLI-parser dependency; strict about what it accepts.
 
 ```
 hathor-audio-probe [devices|run|offline|bench|help|version] [flags]
