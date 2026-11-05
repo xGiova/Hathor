@@ -83,15 +83,19 @@ binary must name them):
 | `process` | private (types re-exported) | `ProcessView`/`ProcessStatus` — where CLAP memory meets `hathor-dsp-core` |
 | `sys` | pub (re-export) | raw `clap-sys` 0.5.0, so plugin binaries name the entry static's type without depending on `clap-sys` themselves |
 
-The whole plugin binary, from `lib.rs` (safe Rust plus one macro plus one static):
+The whole plugin binary — the shape `hathor-analyzer` actually ships (safe Rust plus ONE
+macro call; task-5 made the macro emit the exported static itself):
 
 ```rust
 struct MyPlugin;              // impl hathor_clap::Plugin — no unsafe, no raw pointer seen
 static DESC: clap_plugin_descriptor = hathor_clap::make_descriptor(/* id, name, vendor, … */);
-hathor_clap::clap_entry!(my_entry, MyPlugin);
-#[no_mangle]
-pub static clap_entry: hathor_clap::sys::entry::clap_plugin_entry = my_entry::CLAP_ENTRY;
+hathor_clap::clap_entry!(entry_gen, MyPlugin);  // emits #[no_mangle] pub static clap_entry BY VALUE
+pub use entry_gen::clap_entry;                   // optional: a Rust path for tests/drivers
 ```
+
+**One `clap_entry!` call per crate**: the symbol name is fixed by the ABI, so the macro emits
+it by value at that address (what a host's `dlsym` must land on) — a second call in one crate
+is a link error, by design. One library, one entry.
 
 `Plugin` requires five functions plus the descriptor const — `DESCRIPTOR`, `instantiate`
 (must not talk to the host), `init(Host) -> bool`, `activate`, `deactivate`, and
@@ -107,7 +111,14 @@ none. `Host` is `Copy` (one pointer) and
 (hosts vary; expected, NOT VERIFIED). `ProcessView` maps frames, sample rate, `ctx()` (the
 core `ProcessCtx`), `transport_snapshot()` (the core `Transport`), per-channel slices/blocks
 both ways, `constant_mask` (exposed, **not interpreted**: every frame is processed
-regardless — correct, not optimal), and per-port `latency`.
+regardless — correct, not optimal), and per-port `latency`. `ProcessView::from_sys` is
+**`pub const unsafe fn`** — public since task-5, the documented way to wrap a `clap_process`
+OUTSIDE a host callback (which is how a consumer's tests drive the real `Plugin::process`).
+Its Safety contract is spelled out: every buffer row non-null and sized by `frames_count`,
+channel counts coherent with the arrays, everything alive and stable for `'a`. Inside a
+callback the wrapper discharges this from the vtable contract; outside one, the caller
+assumes the verification burden exactly like the host would — a mistyped `channel_count`
+there is UB downstream, not a panic.
 
 ## Invariants
 

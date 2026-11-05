@@ -1,8 +1,9 @@
 # Module: `hathor-analyzer`
 
-> Status: **written, tested 15** — 7 unit + 2 mock-host lifecycle + 6 spectrum-proof
-> (debug+release, clippy `-D warnings`, fmt; the cost bench is `#[ignore]`d and runs in the
-> gate). Dependencies: `hathor-clap` (path) and `hathor-dsp-fft`; `hathor-dsp-core` is a
+> Status: **written, tested 16** — 8 unit + 2 mock-host lifecycle + 6 spectrum-proof
+> (debug+release, clippy `-D warnings`, fmt; the cost bench is `#[ignore]`d and therefore
+> excluded from the gate — run it explicitly). Dependencies: `hathor-clap` (path) and
+> `hathor-dsp-fft`; `hathor-dsp-core` is a
 > **dev-dependency only** — the allocation guard for the tests; the plugin path itself never
 > references it. The first plugin of the project: a `cdylib` exporting the CLAP entry
 > `clap_entry` **by value** — the artifact a host loads.
@@ -35,9 +36,13 @@ host exists. The v0 behavior is deliberately small so that **every claim is test
   discover later.
 * **Honest refusals, no panics inside host callbacks**: `activate` refuses rates outside
   44.1k–192k (the bank's own range) and a `max_frames` of 0 or > 1<<20; `process` outside
-  the active window returns `Error`; more frames than the scratch promised at `activate`
-  (a spec violation by a host — *expected, NOT VERIFIED*) returns `Error` rather than write
-  past the buffer.
+  the active window returns `Error`; **a too-large block is refused BEFORE any write** —
+  `process` checks `frames` against the `activate`-promised scratch first, before touching
+  a single output row (a host exceeding the max block is a spec violation — *expected, NOT
+  VERIFIED*), so a failed block is at least an **untouched** block:
+  `oversized_block_is_refused_before_any_write` asserts the outputs come back bit-unchanged.
+  The ordering is contract, tightened in task-5 — the check used to run *after* the
+  pass-through writes, which left a refused block half-written.
 * **Latency 0, declared** — the STFT display's inherent block of delay belongs to seeing,
   not to the audio path: the pass-through is same-block. No hard realtime requirement.
 * `init` logs one line through `host.log`, and a host **without** `clap.log` is still a
@@ -61,13 +66,14 @@ anything else is refused. Param order in `param_info` is the host's display list
 
 ## How it works
 
-* **One safe seam for all the math.** `process_audio(l, r, out0, out1)` holds the entire
-  audio behavior in slice terms; the `Plugin::process` adapter differs only in borrow
-  choreography (the view hands out one mutable row at a time) and runs the same
-  `downmix_and_analyze` core. Why the seam exists: the wrapper's `ProcessView::from_sys` is
-  `pub(crate)` — a consumer crate cannot fabricate a view for a direct DSP test. The
-  spectrum proofs exercise *this* arithmetic with no raw pointers anywhere; the C-ABI path
-  is the lifecycle's job. (Gap reported to the lead.)
+* **Exactly one audio path, and it is the host's.** `Plugin::process` *is* the audio path
+  ("This is THE audio path: the spectrum tests fabricate a `clap_process` and drive exactly
+  this", says the adapter's own doc-comment) — a thin borrow choreography that pulls the
+  CLAP rows, runs the pass-through, and hands the slices to the allocation-free
+  `downmix_and_analyze` core. The old `process_audio` seam is **gone**: task-5 made
+  `ProcessView::from_sys` public with its Safety contract, so tests and host now walk the
+  same code and "tested" cannot diverge from "shipped". The fabricated views live in the
+  tests, each raw operation under its own SAFETY comment.
 * **The rebuild decision — labeled.** `FftBank::new` is the bank's only allocation site, so
   the plugin builds it **exactly once, in `activate`** (main thread, outside any deadline),
   and the mono scratch is sized there to the host's advertised max block. A param changed
@@ -79,16 +85,17 @@ anything else is refused. Param order in `param_info` is the host's display list
   hold and ring contents are **transient by CONVENTION §8.2** — a reloaded project rebuilds
   them by listening, exactly like SPAN does after a reload. `load_state` clamps on the way
   in: 72 bytes of garbage cannot produce an out-of-range param.
-* **The entry is hand-wired, and that is a recorded wrapper gap.** A host `dlsym`s the
-  symbol `clap_entry` and treats its address as a `const clap_plugin_entry` — the struct
-  must live **by value at that symbol**, and Rust static initializers cannot copy another
-  static's value, so `clap_entry!`'s generated `pub static CLAP_ENTRY` cannot be
-  re-exported under the exported name by value. `clapabi` therefore re-derives the same
-  tiny table from the wrapper's *audited public pieces* (`entry::init_impl`,
-  `entry::deinit_impl`, `entry::factory_for`, `plugin::create_instance`) and exports it by
-  value. **No wrapper logic is bypassed or duplicated**: init refusal, double-init,
-  factory-id matching, instance creation — every policy delegates. (A macro shape that
-  emits the static by value was reported to the lead; until it lands, this is the truth.)
+* **The entry is one macro call, by value.** `hathor_clap::clap_entry!(entry_gen,
+  AnalyzerPlugin)` emits `#[no_mangle] pub static clap_entry` **by value at the very symbol
+  a host `dlsym`s on**, and wires the one-plugin factory through audited wrapper code only;
+  the `pub use entry_gen::clap_entry` exists so tests and drivers can name it from Rust
+  paths. One macro call per crate — a second is a link error by design (the ABI fixes the
+  symbol name; one library, one entry). The hand-wired `clapabi.rs` this crate once needed
+  is **deleted**: it existed only because Rust static initializers cannot copy another
+  static by value, a wrapper gap **closed in task-5** — and the rebuilt binary proves the
+  macro emits the same table: `dumpbin /exports` shows `clap_entry` at ordinal 1 with RVA
+  `00022878`, byte-for-byte identical to the hand-wired artifact (measured, task-5 report,
+  2026-11-05).
 * **Display views exist, unused.** `levels()` / `render_db()` / `db()` / `log_bin_freq()`
   are exposed for the future display layer so it can read the **same bank** the audio
   thread feeds — not a second one; nothing consumes them in v0 (the tests do, as oracles).
@@ -102,23 +109,29 @@ anything else is refused. Param order in `param_info` is the host's display list
    alive only between activate and deactivate) *and* asserted: 8 blocks inside
    `AudioSection::enter()` with `allocs_here() == 0`, the warm-up run kept outside the gate
    so lazy init cannot hide inside it (the wrapper's recipe, inherited).
-3. **No raw pointer in `analyzer.rs`** — pure safe Rust; the only `unsafe` in the crate is
-   the `clapabi` forwarding, each raw operation in an explicit block with its SAFETY
-   comment (`unsafe_op_in_unsafe_fn = "deny"`; `unwrap_used`/`expect_used`/`todo`/`exit`
-   denied in non-test; `missing_docs` warned).
+3. **No raw pointer in `analyzer.rs`** — pure safe Rust; outside the tests the only
+   `unsafe` in the crate is the `clap_entry!` expansion — wrapper-generated code, audited
+   inside `hathor-clap` itself (`unsafe_op_in_unsafe_fn = "deny"`;
+    `unwrap_used`/`expect_used`/`todo`/`exit`
+   denied in non-test; `missing_docs` warned). The tests carry their own unsafe (fabricated
+   views, mock vtables) under explicit SAFETY comments.
 4. **The param table is the clamp** — hostile input reaches `FftBank::new` only through
    `sanitize`, so the bank's setup asserts are unreachable from outside; and the plugin's
    default face equals the bank's default profile (pinned, see the table above).
 
 ## Verification (tests, not opinions)
 
-* **7 unit** (`analyzer.rs`): `defaults_mirror_the_bank_profile_exactly`,
+* **8 unit** (`analyzer.rs`): `defaults_mirror_the_bank_profile_exactly`,
   `default_params_rebuild_the_default_bank_bit_exact`,
   `hostile_values_are_clamped_or_reset_never_nan`, `state_codec_round_trips_and_clamps`,
   `activate_refuses_unsupported_rates_and_frame_sizes`,
   `param_specs_and_ids_are_consistent` (defaults inside ranges, ids stable, empty views
-  before any bank), `mono_in_copies_to_left_zeroes_right_and_still_drives_the_bank`.
-* **6 spectrum proofs** (`tests/spectrum_proof.rs`) against an **independent oracle** — a
+  before any bank), `mono_in_copies_to_left_zeroes_right_and_still_drives_the_bank`,
+  `oversized_block_is_refused_before_any_write` (65 frames on a 64-frame scratch: `Error`,
+  and the output row still holds its pre-call `7.0` pattern — nothing was written).
+* **6 spectrum proofs** (`tests/spectrum_proof.rs`), driven through the **real
+  `Plugin::process` adapter** via a fabricated `clap_process` wrapped by the now-public
+  `ProcessView::from_sys` — the same path a host takes — against an **independent oracle** — a
   direct Hann DFT summed in f64 over the exact last frame, plus re-derived axis arithmetic:
   never our FFT, never our mapping tables ("two copies of a wrong constant share bugs; an
   independent sum does not"). The sine at **984.375 Hz** (bin-exact for the 1024 tier at
@@ -188,4 +201,7 @@ offline, and the test file says so. Mono-in-right-silent is a *declared v0 rule*
 assumption are **inherited from the wrapper with their labels** (expected, NOT VERIFIED).
 The cost anchor above is the only performance claim this doc makes, it is labeled measured
 with its method, and the zero-frame control prevents the pass-through copy from hiding in
-timer noise. The hand-wired entry is documented as the wrapper gap it is — not as style.
+timer noise. The entry gap that once forced hand-wiring is **closed** (task-5): the macro
+emits the table, and the binary check — same ordinal, same RVA as the hand-wired artifact —
+is the evidence the replacement changed nothing observable. What `dlsym` itself still cannot
+be exercised offline remains exactly as before: declared, and the reason the mock is a proxy.
