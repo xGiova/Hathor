@@ -1,6 +1,6 @@
 # Module: `hathor-analyzer`
 
-> Status: **written, tested 16** — 8 unit + 2 mock-host lifecycle + 6 spectrum-proof
+> Status: **written, tested 17** — 8 unit + 3 mock-host lifecycle + 6 spectrum-proof
 > (debug+release, clippy `-D warnings`, fmt; the cost bench is `#[ignore]`d and therefore
 > excluded from the gate — run it explicitly). Dependencies: `hathor-clap` (path) and
 > `hathor-dsp-fft`; `hathor-dsp-core` is a
@@ -64,6 +64,29 @@ host exists. The v0 behavior is deliberately small so that **every claim is test
 bank's). `value_to_text` writes plain decimal; `param_from_text` is its honest inverse —
 anything else is refused. Param order in `param_info` is the host's display list, verbatim.
 
+## Identity (what the host reads — pinned forever)
+
+`dev.hathor.analyzer` | **Hathor Analyzer** | vendor **Hathor** | url, manual and support all
+`https://github.com/xGiova/Hathor` | version **0.1.0** | "Multi-resolution spectrum analyzer
+(headless v0; GUI pending design)." | features **`audio-effect` + `analyzer`**.
+
+* **The id is forever.** Hosts persist it into saved projects, so renaming it would silently
+  break every session that carries the plugin — "editing the pinned string is a **migration
+  decision, not an edit**". The tripwire is `descriptor_ships_the_pinned_identity_byte_for_byte`:
+  it walks entry → factory → descriptor through the real vtables and pins the whole table
+  byte-for-byte, so a rename is loud, never silent.
+* **The URLs are honest**: the GitHub repo is the only truthful address today and its README
+  *is* the manual for now — the three fields reuse the same address rather than deep-linking
+  docs that do not exist yet.
+* **Two versions, deliberately decoupled**: `0.1.0` is the *host-visible* plugin version,
+  bumped with the milestone tags (repo tag v0.1.0); the cargo workspace version stays a
+  `0.0.0` placeholder by lead decision. Do not read one from the other.
+* **The features are declared, not stubbed**: the spec's own `plugin_features` constants
+  (audio effect + analyzer), NULL-terminated and compile-verified by the wrapper's
+  `FeatureList` — a malformed list never finishes assembling. Our fields are filled and the
+  test walks them; **what remains NOT VERIFIED is the host's reaction to the list** — see
+  the owner checklist below.
+
 ## How it works
 
 * **Exactly one audio path, and it is the host's.** `Plugin::process` *is* the audio path
@@ -92,10 +115,12 @@ anything else is refused. Param order in `param_info` is the host's display list
   paths. One macro call per crate — a second is a link error by design (the ABI fixes the
   symbol name; one library, one entry). The hand-wired `clapabi.rs` this crate once needed
   is **deleted**: it existed only because Rust static initializers cannot copy another
-  static by value, a wrapper gap **closed in task-5** — and the rebuilt binary proves the
-  macro emits the same table: `dumpbin /exports` shows `clap_entry` at ordinal 1 with RVA
+  static by value, a wrapper gap **closed in task-5** — and the rebuilt binary then proved the
+  macro emitted the same table: `dumpbin /exports` showed `clap_entry` at ordinal 1 with RVA
   `00022878`, byte-for-byte identical to the hand-wired artifact (measured, task-5 report,
-  2026-11-05).
+  2026-11-05) — and **task-6 moved that RVA again**: longer static
+  data, the declared feature list. What endures is ordinal 1 and the test-pinned identity
+  table, never an address.
 * **Display views exist, unused.** `levels()` / `render_db()` / `db()` / `log_bin_freq()`
   are exposed for the future display layer so it can read the **same bank** the audio
   thread feeds — not a second one; nothing consumes them in v0 (the tests do, as oracles).
@@ -147,7 +172,7 @@ anything else is refused. Param order in `param_info` is the host's display list
   copy but still analyzes — `in_place_mode_skips_the_copy_but_still_analyzes`; refusal
   paths (not-active, oversized, mismatched R) — `refuses_when_not_active_or_oversized`.
   Noise is the house deterministic Lcg — CONVENTION §5, no RNG in numeric work.
-* **2 lifecycle** (`tests/lifecycle.rs`) — the official **proxy**,
+* **3 lifecycle** (`tests/lifecycle.rs`) — the official **proxy**,
   `analyzer_lifecycle_through_the_c_abi`, driving the very static
   exported at `clap_entry`: version handshake, double-init refused (wrapper policy),
   foreign factory id → null, descriptor fields through raw C strings, foreign plugin id
@@ -162,22 +187,35 @@ anything else is refused. Param order in `param_info` is the host's display list
   post-gate; the AudioSection block above; in-place rows untouched; `process` after
   `deactivate` = `CLAP_PROCESS_ERROR`; entry flag clear after `deinit`. Plus
   `create_paths_stay_clean`: null id refused; a null host still *creates* but `init`
-  refuses it instead of misbehaving — and it touches no global, safe in parallel.
+  refuses it instead of misbehaving — and it touches no global, safe in parallel. And
+  `descriptor_ships_the_pinned_identity_byte_for_byte`: the Identity section above is not
+  prose, it is asserted — every string field, the version, and the feature list read back
+  through the real factory ("features are declared, not stubbed"; the list ends with a NULL
+  row per `clap.h`). Runs alongside the lifecycle test: a data-table check, no globals.
 * **1 cost bench**, `#[ignore]`d (`tests/cost_bench.rs`, `whole_plugin_path_cost_per_block`) —
   a debug timing is a fiction;
   the whole plugin path through the same vtable a host calls, with a **0-frame control**
   measuring the wrapper+view floor to subtract.
 
-## Measured (dev machine, release, 2026-11-05) — the anchor
+## Measured (dev machine, release) — the anchor and the no-regression re-check
 
-**12.34 µs per 64-frame block, whole plugin path** (vtable + view handling + bit-exact
-pass-through + downmix + bank) = **0.93% of one core** against the 1333.33 µs budget —
-*measured*, `cargo test -p hathor-analyzer --release --offline -- --ignored`. The
-wrapper+view floor by the zero-frame control is **0.01 µs** — plumbing is noise, the DSP is
-the cost. Reference: the bank alone measured **0.94% of a core** (`hathor-dsp-fft`'s own
-bench, same machine, same day). The two agree within the resolution of their different
-methods; the honest reading is that adding pass-through, downmix and the whole FFI path on
-top of the bank changed nothing measurable.
+**The anchor: 12.34 µs per 64-frame block, whole plugin path** (vtable + view handling +
+bit-exact pass-through + downmix + bank) = **0.93% of one core** against the 1333.33 µs
+budget — *measured* on the task-4/5 code path, `cargo test -p hathor-analyzer --release
+--offline -- --ignored`. The wrapper+view floor by the zero-frame control is **0.01 µs** —
+plumbing is noise, the DSP is the cost. Reference: the bank alone measured **0.94% of a
+core** (`hathor-dsp-fft`'s own bench, same machine, same day). The two agree within the
+resolution of their different methods; the honest reading is that adding pass-through,
+downmix and the whole FFI path on top of the bank changed nothing measurable.
+
+**Re-check after the identity/features work** (same bench, `986a2a0`, three release runs,
+2026-11-05, *measured at the lead's gate*): **13.38 / 13.46 / 13.55 µs/block = 1.00–1.02%
+of one core**, floor control unchanged at **0.01–0.02 µs**. The drift from 12.34 sits
+inside the declared **±10% wallclock resolution** of this method — same code path, longer
+static data. This number's only job is **proof of no regression**: it is NOT a new anchor.
+The home anchor stays **12.34** until we deliberately redefine it at M1 close, with a
+method decision made on purpose — numbers are not promoted by a good run, they are
+re-measured with intent.
 
 ## Deferred (and why)
 
@@ -191,17 +229,35 @@ top of the bank changed nothing measurable.
 * **Transport-driven display** (tempo grid, beat clock): the wrapper already maps the
   transport; the analyzer does not ask for it while headless.
 
+## The owner's load step — checklist (what no CI can take)
+
+1. Build the `cdylib` and install it where Reaper scans for CLAP plugins (artifact recipe in
+   the task report).
+2. Load it: the first real `dlsym` + `init`/factory/descriptor reads by a real host — the one
+   thing the mock declares it cannot exercise.
+3. **Features:** verify `audio-effect` and `analyzer` show up sane in the plugin browser —
+   host-side handling of the declared list is expected-per-spec and **NOT VERIFIED** today;
+   this is the only field task-6 filled that no offline test can complete.
+4. Pass-through in a real session: an analyzer on any track must leave the sound bit-identical.
+5. Save → reload the project: id `dev.hathor.analyzer` resolves and the 72-byte state
+   round-trips through the real host's streams.
+
 ## Honesty ledger
 
 **HOST LOAD: NOT VERIFIED.** The lifecycle proof is the mock; loading the `.clap` in a real
 Reaper is an **owner step** — the artifact recipe is in the commit report; the exported
 table is driven exactly as a host would drive it, but `dlsym` itself cannot be exercised
 offline, and the test file says so. Mono-in-right-silent is a *declared v0 rule*.
-`features=null`, double-init refusal, in-place-pair promises and every host-behavior
-assumption are **inherited from the wrapper with their labels** (expected, NOT VERIFIED).
-The cost anchor above is the only performance claim this doc makes, it is labeled measured
-with its method, and the zero-frame control prevents the pass-through copy from hiding in
+Double-init refusal, in-place-pair promises and every host-behavior
+assumption are **inherited from the wrapper with their labels** (expected, NOT VERIFIED);
+the feature **list** is now declared and compile-verified on our side, and its **host-side
+reaction** is the newest open item on the checklist above.
+The Measured block above is the only performance claim this doc makes — anchor *and*
+no-regression re-check, each number labeled with its method and its purpose, and the
+zero-frame control prevents the pass-through copy from hiding in
 timer noise. The entry gap that once forced hand-wiring is **closed** (task-5): the macro
-emits the table, and the binary check — same ordinal, same RVA as the hand-wired artifact —
-is the evidence the replacement changed nothing observable. What `dlsym` itself still cannot
+emits the table, and the task-5 binary check — same ordinal, same RVA at the time — proved
+the swap changed nothing observable; task-6's longer static data moved the RVA, which is
+exactly why the durable proof is ordinal 1 plus the test-pinned identity, not any address.
+What `dlsym` itself still cannot
 be exercised offline remains exactly as before: declared, and the reason the mock is a proxy.

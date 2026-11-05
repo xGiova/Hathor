@@ -1,6 +1,6 @@
 # Module: `hathor-clap`
 
-> Status: **written, tested 27** — 24 unit + 2 integration + 1 doctest (debug+release,
+> Status: **written, tested 28** — 25 unit + 2 integration + 1 doctest (debug+release,
 > clippy `-D warnings`, fmt; the integration pair is the mock-host lifecycle proxy).
 > Dependencies: `clap-sys` 0.5.0 (the ABI truth, re-exported as `hathor_clap::sys`) and
 > `hathor-dsp-core` as a **normal dependency — approved 2026-11-05**: translating
@@ -75,7 +75,7 @@ binary must name them):
 |---|---|---|
 | `abi` | pub | const size/alignment gates for every `#[repr(C)]` struct touched (see Invariants) |
 | `cstr` | private (items re-exported) | `clap_cstr!`, padded-name read/write into host fixed arrays |
-| `descriptor` | private (re-exported) | `make_descriptor` — the `const` builder (the 8 arguments *are* the ABI) |
+| `descriptor` | private (re-exported) | `make_descriptor` — the `const` builder (the 9 arguments *are* the ABI, the 9th being `Option<FeatureList>`) + `FeatureList`, whose `const fn new` enforces the `clap.h` list law at compile time |
 | `entry` | pub | `init_impl`/`deinit_impl`/`factory_for`, the `clap_entry!` macro, `is_initialized` |
 | `events` | private (types re-exported) | `InEvents`/`OutEvents`/`ParamUpdate` — call-scoped event views |
 | `host` | private (types re-exported) | `Host` (the out-bound calls) + `LogSeverity` |
@@ -155,15 +155,24 @@ there is UB downstream, not a panic.
    non-test code and `missing_docs` warned.
 5. **Descriptors are `static`, never heap** — the host keeps the pointer for the life of the
    library, so a heap descriptor is either a leak or a dangling promise; `make_descriptor`
-   is `const` for exactly that reason. An empty feature list publishes `features = null`
+   is `const` for exactly that reason — and it now takes a ninth argument,
+   `Option<FeatureList>`. A declared list is a `FeatureList`: its `const fn new` verifies the
+   `clap.h` law — non-empty, last row NULL — **at compile time, so a malformed list never
+   finishes assembling the descriptor**. The usage note, pinned where it bites: the
+   raw-pointer array cannot itself be a `static` (pointers are not `Sync`), so the list is
+   built **inline in the static's initializer** (const promotion); `FeatureList::new(&[…])`
+   in *runtime* position is E0716, and the `DESC_FEAT` static in `descriptor.rs` is the
+   shape that documents the rule. An empty list still publishes `features = null`
    (the `clap.h` rule reads NULL as the empty terminator; **a host treating null as
    malformed would be a plugin-loading bug we have not observed — NOT VERIFIED**).
 
 ## Verification (tests, not opinions)
 
-* **24 unit** — `abi` 2 (the layout echo, the field-zero rule), `cstr` 3 (padded names
+* **25 unit** — `abi` 2 (the layout echo, the field-zero rule), `cstr` 3 (padded names
   terminate inside the host's array, the empty string, `clap_cstr!`'s static NUL),
-  `descriptor` 2 (every field round-trips from its own `static`; address stability),
+  `descriptor` 3 (every field round-trips from its own `static`; address stability; a
+  declared list survives assembly and **terminates NULL per clap.h** —
+  `feature_list_survives_assembly_and_terminates`),
   `entry` 2 (`init_deinit_cycle_refuses_double_init`, `factory_answers_only_the_clap_factory_id`),
   `events` 4 (null lists are no-events not wrong-answers; foreign spaces/short headers
   skipped in order; missing vtable slots read empty, never panic; pushes go through the

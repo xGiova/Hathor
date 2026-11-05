@@ -39,8 +39,8 @@ are not twins (the softening itself: owner decision, 2026-11-05, after the probe
 | `hathor-dsp-fft` | written, tested (kernels + M1 bank: 36 lib + 7 contract, 2 bench ignored) | [modules/hathor-dsp-fft.md](modules/hathor-dsp-fft.md) |
 | `hathor-dsp-measure` | written, tested | [modules/hathor-dsp-measure.md](modules/hathor-dsp-measure.md) |
 | `hathor-host-graph` | written, tested (M0 Chain) | [modules/hathor-host-graph.md](modules/hathor-host-graph.md) |
-| `hathor-clap` | written, tested 27 (24 unit + 2 integration + 1 doctest; real-host load = owner step) | [modules/hathor-clap.md](modules/hathor-clap.md) |
-| `hathor-analyzer` | written, tested 16 (8 unit + 2 lifecycle + 6 spectrum proofs; cost bench ignored; host load = owner step) | [modules/hathor-analyzer.md](modules/hathor-analyzer.md) |
+| `hathor-clap` | written, tested 28 (25 unit + 2 integration + 1 doctest; real-host load = owner step) | [modules/hathor-clap.md](modules/hathor-clap.md) |
+| `hathor-analyzer` | written, tested 17 (8 unit + 3 lifecycle + 6 spectrum proofs; cost bench ignored; host load = owner step) | [modules/hathor-analyzer.md](modules/hathor-analyzer.md) |
 | gain staging & channel variance (M6 contract, policy not crate) | spec | [modules/hathor-calibration-variance.md](modules/hathor-calibration-variance.md) |
 | `hathor-nam` (accepted draft, crate not yet created; gated G5) | draft spec (M6.5) | [modules/hathor-nam.md](modules/hathor-nam.md) |
 | `hathor-audio-probe` | written, tested | [modules/hathor-audio-probe.md](modules/hathor-audio-probe.md) |
