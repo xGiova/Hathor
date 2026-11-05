@@ -7,7 +7,7 @@ members = [
     "crates/hathor-dsp-fft",
     "crates/hathor-dsp-measure",
     "crates/hathor-host-graph",
-    "apps/hathor-audio-probe", "crates/hathor-clap",
+    "apps/hathor-audio-probe", "crates/hathor-clap", "plugins/hathor-analyzer",
 ]
 
 [workspace.package]
