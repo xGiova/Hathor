@@ -29,7 +29,7 @@ share — which is why the lower layers expose it honestly.
 |---|---|---|---|---|
 | `crates/hathor-dsp-core` | realtime contract, buffers, node ABI, params, allocation guard | M0 | **implemented** | 20/20 (debug+release) |
 | `crates/hathor-dsp-filters` | RBJ biquads: f64 design, DF2T runtime, AVX2 kernel | M0–M1 | **implemented** | 27/27 (debug+release) |
-| `crates/hathor-dsp-fft` | complex/real FFT, STFT front-end | M0–M1 | **implemented** (kernels; STFT front-end → M1) | 29/29 (debug+release) |
+| `crates/hathor-dsp-fft` | complex/real FFT, STFT front-end | M0–M1 | **implemented** (kernels + multi-rate bank: whole bank = 0.94% of one core, measured release) | 43/43 +2 bench (debug+release) |
 | `crates/hathor-dsp-measure` | level/correlation/time-alignment, masking meter | M0–M1 | **implemented** (M0 API; masking → M1) | 54/54 (debug+release) |
 | `crates/hathor-host-graph` | node chain, scratch buffers, latency sum | M0–M5 | **implemented** (M0 Chain) | 12+1/12+1 (debug+release) |
 | `apps/hathor-audio-probe` | cpal/WASAPI harness, xrun proxy & cost bench | M0 | **implemented** (G1 closed: live 60 s WASAPI run, 0 allocs, worst chunk 0.042× budget) | 169/169 (debug+release) |

@@ -50,7 +50,11 @@ pub fn null_residue_db(a: &[f32], b: &[f32], gain_db: f32, invert: bool) -> f32;
 
 The "where they step on each other" between kick and bass:
 
-1. STFT of both signals (the bank from `hathor-dsp-fft`, size ~2048, Hann, hop 512).
+1. STFT of both signals (`RealFftPlan` of `hathor-dsp-fft`, size ~2048, Hann, hop 512) —
+   **not** the multi-rate display bank: two different jobs. A measurement wants uniform
+   resolution and a free hop; the bank is display architecture with normative tiers
+   (256/1024/4096/16384, hop fixed at N/4) — there is no 2048 tier there to request, and
+   asking for one would be the wrong instinct anyway.
 2. Per bin: `masking(k) = min(L_kick(k), L_bass(k)) · spread(k)` — the energy of the weaker one
    *under* the louder one is wasted/covered energy; `spread` is the widening of the masking
    towards neighbouring bins (a known psychoacoustic curve: ~25 dB/decade towards the highs,

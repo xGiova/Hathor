@@ -33,7 +33,7 @@ Exercises.`
 |---|---|---|
 | `hathor-dsp-core` | written, tested | [modules/hathor-dsp-core.md](modules/hathor-dsp-core.md) |
 | `hathor-dsp-filters` | written, tested | [modules/hathor-dsp-filters.md](modules/hathor-dsp-filters.md) |
-| `hathor-dsp-fft` | written, tested (kernels) | [modules/hathor-dsp-fft.md](modules/hathor-dsp-fft.md) |
+| `hathor-dsp-fft` | written, tested (kernels + M1 bank: 36 lib + 7 contract, 2 bench ignored) | [modules/hathor-dsp-fft.md](modules/hathor-dsp-fft.md) |
 | `hathor-dsp-measure` | written, tested | [modules/hathor-dsp-measure.md](modules/hathor-dsp-measure.md) |
 | `hathor-host-graph` | written, tested (M0 Chain) | [modules/hathor-host-graph.md](modules/hathor-host-graph.md) |
 | gain staging & channel variance (M6 contract, policy not crate) | spec | [modules/hathor-calibration-variance.md](modules/hathor-calibration-variance.md) |

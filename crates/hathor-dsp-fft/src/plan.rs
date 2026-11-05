@@ -362,11 +362,11 @@ mod tests {
         plan.process(&mut data);
     }
 
-    /// Module-doc exercise 3, asserted at the exact arithmetic. Note a doc-drift:
-    /// the doc quotes "answer: 20.5" for 60 Hz at n = 16384/48 kHz, but the exact
-    /// bin is 60·16384/48000 = **20.48** (the doc rounds). The point — a
-    /// non-integer, hence leakage — stands either way; the test pins the number,
-    /// and the drift is reported to the lead rather than patched in docs/.
+    /// Module-doc exercise 3, asserted at the exact arithmetic: 60 Hz at
+    /// n = 16384/48 kHz lands on bin 60·16384/48000 = **20.48**, not the 20.5 the
+    /// doc once quoted (fixed in docs 2026-11-05 — the historical note at the
+    /// module header records the drift hunt). The point — a non-integer, hence
+    /// leakage — is what the test pins.
     #[test]
     fn bin_and_freq_agree_with_the_doc_number() {
         let n = 16384;
