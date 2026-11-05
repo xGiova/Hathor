@@ -279,6 +279,7 @@ name = "hathor-clap"
 version = "0.0.0"
 dependencies = [
  "clap-sys",
+ "hathor-dsp-core",
 ]
 
 [[package]]

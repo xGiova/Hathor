@@ -1,0 +1,233 @@
+//! Library entry points: `clap_plugin_entry` behind a const-registration macro.
+//!
+//! ## What the host actually calls, in order (CLAP 1.2)
+//!
+//! `entry.init(plugin_path)` → `entry.get_factory("clap.plugin-factory")` →
+//! `factory.get_plugin_count()` / `get_plugin_descriptor(i)` /
+//! `create_plugin(host, id)` → per instance: `plugin.init()` → add extensions →
+//! `activate(rate, min, max)` → `start_processing()` → `process(&block)*` →
+//! `stop_processing()` → `deactivate()` → `destroy()` → `entry.deinit()`.
+//!
+//! ## Raw pointers in this module, and why they are sound
+//!
+//! The generated `extern "C"` functions are the boundary: everything entering
+//! them is a raw pointer the host swears to keep valid for the call, and
+//! everything leaving them is either a value or a pointer into memory we leaked
+//! on purpose ([`crate::plugin::create_instance`]) and reclaim in exactly one
+//! place (`destroy`). `init`/`deinit` touch no allocation and no global besides
+//! one atomic flag; `get_factory` compares strings, never dereferences blindly;
+//! a null or foreign `id` answers `null`, which is the CLAP way to say "not
+//! mine".
+//!
+//! [`clap_entry!`] keeps the whole crate free of name collisions: it generates a
+//! module around the user's chosen identifier, and every static (`CLAP_ENTRY`,
+//! `CLAP_FACTORY`, descriptor) lives inside it. The consumer's plugin binary
+//! still exports exactly one symbol: `clap_entry` (`#[no_mangle]` stays the
+//! plugin task's decision, since a `cdylib` can also carry other entries).
+
+use core::ffi::{c_char, CStr};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use crate::sys::factory::plugin_factory::{clap_plugin_factory, CLAP_PLUGIN_FACTORY_ID};
+
+/// One initialization slot per library: CLAP allows `init` only before the first
+/// `deinit`; a second `init` without `deinit` is host misuse. We answer `false`
+/// (the spec's way to refuse) rather than pretend success — the host contract
+/// interpretation is expected, NOT VERIFIED against real hosts.
+static ENTRY_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// `entry.init`: records initialization, allocates nothing, touches no env.
+///
+/// # Safety
+///
+/// Called by the host through the `clap_plugin_entry` vtable. `plugin_path` is a
+/// NUL-terminated string valid for the call (CLAP contract) — we do not read it,
+/// we only require it to be a well-formed pointer if non-null.
+pub unsafe extern "C" fn init_impl(plugin_path: *const c_char) -> bool {
+    let _path = plugin_path; // documented above: never dereferenced, never needed
+    ENTRY_INITIALIZED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+        .is_ok()
+}
+
+/// `entry.deinit`: clears the initialization flag. The wrapper keeps no global
+/// instance list, so there is nothing else to reclaim: any instance the host
+/// forgot to `destroy` is the host's leak, not ours (CLAP requires destroy
+/// before deinit — expected, NOT VERIFIED).
+pub extern "C" fn deinit_impl() {
+    ENTRY_INITIALIZED.store(false, Ordering::SeqCst);
+}
+
+/// Answers the factory pointer only for the one id CLAP defines; every other id
+/// answers null without ever dereferencing `factory_id` (a null pointer is a
+/// legal "who are you?" a host might even send — we refuse it cleanly).
+///
+/// # Safety
+///
+/// `factory_id` must be null or a NUL-terminated string valid for the call
+/// (CLAP host contract; expected, NOT VERIFIED per host).
+pub unsafe extern "C" fn factory_for(
+    factory_id: *const c_char,
+    factory: *const clap_plugin_factory,
+) -> *const core::ffi::c_void {
+    let Some(id) = (unsafe { factory_id.as_ref() }) else {
+        return core::ptr::null();
+    };
+    // SAFETY: non-null checked; the host swears `id` is a valid C string for the
+    // duration of the call.
+    if unsafe { CStr::from_ptr(id) } == CLAP_PLUGIN_FACTORY_ID {
+        factory.cast::<core::ffi::c_void>()
+    } else {
+        core::ptr::null()
+    }
+}
+
+/// True after `init_impl` succeeded and before `deinit_impl` cleared it. For
+/// plugin-side sanity checks (task-4 may gate GUI work on it); never load-bearing
+/// inside this wrapper.
+pub fn is_initialized() -> bool {
+    ENTRY_INITIALIZED.load(Ordering::SeqCst)
+}
+
+/// Defines the library entry for one [`Plugin`] type inside a generated module:
+///
+/// ```ignore
+/// clap_entry!(pub my_analyzer, MyAnalyzer);
+/// // then, in a `cdylib` crate:
+/// #[no_mangle]
+/// pub static clap_entry: hathor_clap::sys::entry::clap_plugin_entry = my_analyzer::CLAP_ENTRY;
+/// ```
+///
+/// The module exposes `CLAP_ENTRY` (the `clap_plugin_entry` vtable) plus the
+/// factory and descriptor wiring that point at `<$plugin as Plugin>::DESCRIPTOR`.
+/// All names the macro needs are `$crate`-qualified, so nothing collides with the
+/// consumer's namespace; `pub use` of the module is the consumer's choice.
+#[macro_export]
+macro_rules! clap_entry {
+    ($vis:vis $module:ident, $plugin:ty) => {
+        $vis mod $module {
+            //! Generated by `hathor_clap::clap_entry!`: the entry vtable and the
+            //! one-plugin factory for the type it was given.
+
+            #![allow(dead_code)] // the factory slots speak to a host, not to us
+
+            // the plugin type path resolves in the scope where the macro was called
+            use super::*;
+
+            use ::core::ffi::{c_char, c_void};
+            use $crate::sys::entry::clap_plugin_entry;
+            use $crate::sys::factory::plugin_factory::clap_plugin_factory;
+            use $crate::sys::host::clap_host;
+            use $crate::sys::plugin::{clap_plugin, clap_plugin_descriptor};
+            use $crate::sys::version::CLAP_VERSION;
+
+            // SAFETY discipline: the three entry functions delegate to the audited
+            // `impl` functions; the three factory functions hand out only statics
+            // and instances created through the wrapper's single leak point.
+
+            unsafe extern "C" fn init(plugin_path: *const c_char) -> bool {
+                // SAFETY: same contract as `init_impl`: `plugin_path` is the
+                // host's NUL-terminated string (or null) for the call.
+                unsafe { $crate::entry::init_impl(plugin_path) }
+            }
+
+            extern "C" fn deinit() {
+                $crate::entry::deinit_impl();
+            }
+
+            unsafe extern "C" fn get_factory(factory_id: *const c_char) -> *const c_void {
+                // SAFETY: delegated check; `CLAP_FACTORY` is a static, so its
+                // address is valid for the life of the library — the host keeps
+                // it until `deinit` (CLAP contract; expected, NOT VERIFIED).
+                unsafe {
+                    $crate::entry::factory_for(factory_id, &raw const CLAP_FACTORY)
+                }
+            }
+
+            unsafe extern "C" fn get_plugin_count(
+                _factory: *const clap_plugin_factory,
+            ) -> u32 {
+                1
+            }
+
+            unsafe extern "C" fn get_plugin_descriptor(
+                _factory: *const clap_plugin_factory,
+                index: u32,
+            ) -> *const clap_plugin_descriptor {
+                if index == 0 {
+                    <$plugin as $crate::plugin::Plugin>::DESCRIPTOR
+                } else {
+                    core::ptr::null()
+                }
+            }
+
+            unsafe extern "C" fn create_plugin(
+                _factory: *const clap_plugin_factory,
+                host: *const clap_host,
+                plugin_id: *const c_char,
+            ) -> *const clap_plugin {
+                // SAFETY: forwarded verbatim; `create_instance` null-checks the
+                // id and leaks exactly one `Instance<$plugin>` per success,
+                // reclaimed by the instance's `destroy`.
+                unsafe { $crate::plugin::create_instance::<$plugin>(host, plugin_id) }
+            }
+
+            static CLAP_FACTORY: clap_plugin_factory = clap_plugin_factory {
+                get_plugin_count: Some(get_plugin_count),
+                get_plugin_descriptor: Some(get_plugin_descriptor),
+                create_plugin: Some(create_plugin),
+            };
+
+            /// The entry vtable: give this to the host as `clap_entry` from your
+            /// `cdylib` (`#[no_mangle] pub static clap_entry = …::CLAP_ENTRY;`).
+            pub static CLAP_ENTRY: clap_plugin_entry = clap_plugin_entry {
+                clap_version: CLAP_VERSION,
+                init: Some(init),
+                deinit: Some(deinit),
+                get_factory: Some(get_factory),
+            };
+        }
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::ffi::c_void;
+
+    #[test]
+    fn init_deinit_cycle_refuses_double_init() {
+        // Serial discipline not needed: this test is the only one touching the
+        // process-global flag — do not add init-asserting tests casually.
+        let first = unsafe { init_impl(core::ptr::null()) };
+        assert!(is_initialized());
+        let second = unsafe { init_impl(core::ptr::null()) };
+        deinit_impl();
+        assert!(first, "a fresh init succeeds");
+        assert!(!second, "a second init without deinit is refused");
+        assert!(!is_initialized(), "deinit clears the flag");
+        assert!(
+            unsafe { init_impl(core::ptr::null()) },
+            "and after deinit, init works again"
+        );
+        deinit_impl();
+    }
+
+    #[test]
+    fn factory_answers_only_the_clap_factory_id() {
+        static FACTORY: clap_plugin_factory = clap_plugin_factory {
+            get_plugin_count: None,
+            get_plugin_descriptor: None,
+            create_plugin: None,
+        };
+        let null_id = unsafe { factory_for(core::ptr::null(), &raw const FACTORY) };
+        assert!(null_id.is_null(), "a null id never gets a body");
+        // SAFETY: `CLAP_PLUGIN_FACTORY_ID` is a valid static C string.
+        let ours = unsafe { factory_for(CLAP_PLUGIN_FACTORY_ID.as_ptr(), &raw const FACTORY) };
+        assert!(!ours.is_null(), "the one real id gets the factory");
+        assert_eq!(ours, (&raw const FACTORY).cast::<c_void>());
+        let bogus = crate::clap_cstr!("not.the.factory");
+        let other = unsafe { factory_for(bogus.as_ptr(), &raw const FACTORY) };
+        assert!(other.is_null(), "anything else is refused");
+    }
+}

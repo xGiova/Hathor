@@ -9,3 +9,15 @@ repository.workspace = true
 
 [dependencies]
 clap-sys = "0.5.0"
+# Normal (not dev) dependency, approved 2026-11-05: translating clap_audio_buffer
+# into the core Block/ProcessCtx ABI *is* this wrapper's job, so its public surface
+# legitimately exposes those types.
+hathor-dsp-core.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+panic_in_result_fn = "deny"
+exit = "deny"
+todo = "deny"
