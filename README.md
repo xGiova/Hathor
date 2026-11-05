@@ -34,7 +34,8 @@ share — which is why the lower layers expose it honestly.
 | `crates/hathor-host-graph` | node chain, scratch buffers, latency sum | M0–M5 | **implemented** (M0 Chain) | 12+1/12+1 (debug+release) |
 | `crates/hathor-clap` | safe plugin-side CLAP wrapper over clap-sys 0.5.0 (mock-host proxy green; real DAW load = owner step) | M1 | **implemented** | 27/27 +2 doctest-sketch ignored (debug+release) |
 | `apps/hathor-audio-probe` | cpal/WASAPI harness, xrun proxy & cost bench | M0 | **implemented** (G1 closed: live 60 s WASAPI run, 0 allocs, worst chunk 0.042× budget) | 169/169 (debug+release) |
-| `plugins/*` | EQ, Filter, SPAN-like, Compressor, Reverb, Delay, Saturator, kick↔bass phase-alignment plugin | M1–M4 | planned | — |
+| `plugins/hathor-analyzer` | SPAN-like analyzer v0, headless CLAP (GUI pending design; real-DAW load = owner step) | M1 | **built** (anchor: whole path 0.93% of one core, measured) | 15/15 (debug+release) |
+| `plugins/*` (rest) | EQ, Filter, Compressor, Reverb, Delay, Saturator, kick↔bass phase-alignment | M1–M4 | planned | — |
 | `crates/hathor-vst3-host` | C++ VST3 bridge (frozen ABI) | M5 | planned | — |
 | Channel-strip calibration & variance | `G_cal` gain-staging contract, seeded per-channel drift, sweet-spot meter | M6 | spec ([docs/modules/hathor-calibration-variance.md](docs/modules/hathor-calibration-variance.md)) | — |
 | `crates/hathor-nam` (accepted draft, not yet created) | `.nam` loader + causal NN inference node (NAM captures) | M6.5 (gate G5) | draft spec ([docs/modules/hathor-nam.md](docs/modules/hathor-nam.md)) | — |
