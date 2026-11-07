@@ -352,3 +352,136 @@ fn refuses_when_not_active_oversized_or_broken() {
         "views empty when no bank"
     );
 }
+
+/// The 64-bit host: `data64` rows only, `data32` null.
+fn drive64(
+    p: &mut AnalyzerPlugin,
+    in_ptrs: &mut [*mut f64],
+    out_ptrs: &mut [*mut f64],
+    frames: u32,
+) -> ProcessStatus {
+    let in_buf = clap_audio_buffer {
+        data32: core::ptr::null_mut(),
+        data64: in_ptrs.as_mut_ptr(),
+        channel_count: in_ptrs.len() as u32,
+        latency: 0,
+        constant_mask: 0,
+    };
+    let mut out_buf = clap_audio_buffer {
+        data32: core::ptr::null_mut(),
+        data64: out_ptrs.as_mut_ptr(),
+        channel_count: out_ptrs.len() as u32,
+        latency: 0,
+        constant_mask: 0,
+    };
+    let proc = clap_process {
+        steady_time: 0,
+        frames_count: frames,
+        transport: core::ptr::null(),
+        audio_inputs: &raw const in_buf,
+        audio_outputs: &raw mut out_buf,
+        audio_inputs_count: 1,
+        audio_outputs_count: 1,
+        in_events: core::ptr::null(),
+        out_events: core::ptr::null(),
+    };
+    // SAFETY: this test IS the host: the rows back `frames` f64 samples,
+    // arrays match declared counts, all alive until `drive64` returns.
+    let mut view = unsafe { ProcessView::from_sys(&proc, SR) };
+    p.process(&mut view)
+}
+
+fn tone_frame64(base: usize) -> [f64; 64] {
+    core::array::from_fn(|i| (std::f64::consts::TAU * F_TONE * (base + i) as f64 / SR).sin() * 0.5)
+}
+
+#[test]
+fn a_64_bit_host_is_bit_exact_and_lights_the_same_bin() {
+    // The same 24-tone proof as `a_known_sine_lights_the_bin_the_oracle_
+    // predicts`, at double width. The downmix keeps f64 precision until the
+    // single cast, so the bank processes EXACTLY the f32 test's mono stream
+    // ((0.5*(x+x)) as f32 == x as f32) — the oracle prediction transfers.
+    let mut p = activated_bypass();
+    let mut stream: Vec<f32> = Vec::with_capacity(24 * 64);
+    for b in 0..24 {
+        let mut in0 = tone_frame64(b * 64);
+        let mut in1 = in0;
+        let keep = in0;
+        let (mut o0, mut o1) = ([0.0f64; 64], [0.0f64; 64]);
+        let mut in_ptrs = [in0.as_mut_ptr(), in1.as_mut_ptr()];
+        let mut out_ptrs = [o0.as_mut_ptr(), o1.as_mut_ptr()];
+        assert!(matches!(
+            drive64(&mut p, &mut in_ptrs, &mut out_ptrs, 64),
+            ProcessStatus::Continue
+        ));
+        assert_eq!(o0, keep, "64-bit pass-through moves the host's own bytes");
+        assert_eq!(o1, keep);
+        stream.extend_from_slice(&keep.map(|v| v as f32));
+        // Mixed-width refusal, checked on the very first block's shape: an
+        // f64 input port facing an f32 output port is malformed; process
+        // must Error BEFORE writing (the out rows here are f64, so run a
+        // dedicated pair once, below the loop — cheap).
+    }
+    {
+        let mut in64 = [0.25f64; 64];
+        let mut out32 = [9.0f32; 64];
+        let mut ip = [in64.as_mut_ptr()];
+        let mut op = [out32.as_mut_ptr()];
+        let in_buf = clap_audio_buffer {
+            data32: core::ptr::null_mut(),
+            data64: ip.as_mut_ptr(),
+            channel_count: 1,
+            latency: 0,
+            constant_mask: 0,
+        };
+        let mut out_buf = clap_audio_buffer {
+            data32: op.as_mut_ptr(),
+            data64: core::ptr::null_mut(),
+            channel_count: 1,
+            latency: 0,
+            constant_mask: 0,
+        };
+        let proc = clap_process {
+            steady_time: 0,
+            frames_count: 64,
+            transport: core::ptr::null(),
+            audio_inputs: &raw const in_buf,
+            audio_outputs: &raw mut out_buf,
+            audio_inputs_count: 1,
+            audio_outputs_count: 1,
+            in_events: core::ptr::null(),
+            out_events: core::ptr::null(),
+        };
+        // SAFETY: our own buffers, alive for the call.
+        let mut view = unsafe { ProcessView::from_sys(&proc, SR) };
+        assert!(matches!(p.process(&mut view), ProcessStatus::Error));
+        assert!(
+            out32.iter().all(|&x| x == 9.0),
+            "a refused block writes nothing"
+        );
+    }
+    p.render_db();
+    let db = p.db();
+    let i0 = log_position(F_TONE, BINS) as usize;
+    let mut best_i = i0;
+    let mut best_pred = f64::MIN;
+    for i in i0.saturating_sub(2)..=(i0 + 2).min(BINS - 1) {
+        let pred = expected_tier_bin(&stream, 1024, i).max(expected_tier_bin(&stream, 256, i));
+        if pred > best_pred {
+            best_pred = pred;
+            best_i = i;
+        }
+    }
+    let measured_dom = db
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(i, _)| i);
+    assert_eq!(measured_dom, Some(best_i), "same dominant bin at 64-bit");
+    let pred_db = 10.0 * best_pred.log10();
+    let meas_db = db[best_i] as f64;
+    assert!(
+        (meas_db - pred_db).abs() < 0.3,
+        "bin {best_i}: measured {meas_db:.3} dB vs oracle {pred_db:.3} dB"
+    );
+}

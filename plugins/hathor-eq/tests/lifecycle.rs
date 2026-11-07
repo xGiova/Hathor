@@ -282,6 +282,59 @@ static NULL_OUT_LIST: hathor_clap::sys::events::clap_output_events =
         try_push: None,
     };
 
+// All-8-bands engagement list for the strict hot-path test: the REAL host
+// door (params flush), not a Rust shortcut.
+
+static mut HOT: Option<[hathor_clap::sys::events::clap_event_param_value; 32]> = None;
+
+fn fill_hot_events() {
+    let mut evs = [mk_event(0, 0.0); 32];
+    let mut k = 0usize;
+    for b in 0..8u32 {
+        let base = 2 + b * 4;
+        evs[k] = mk_event(base, (b % 6 + 1) as f64); // a live kind per band
+        evs[k + 1] = mk_event(base + 1, 110.0 * (b as f64 + 1.0));
+        evs[k + 2] = mk_event(base + 2, 3.0 - b as f64);
+        evs[k + 3] = mk_event(base + 3, 0.9);
+        k += 4;
+    }
+    // SAFETY: written once inside `serial()` before the list is read; the
+    // value replaces the initial `None`, no old value leaks.
+    unsafe { core::ptr::write(&raw mut HOT, Some(evs)) };
+}
+
+unsafe extern "C" fn hot_size(_l: *const hathor_clap::sys::events::clap_input_events) -> u32 {
+    32
+}
+
+unsafe extern "C" fn hot_get(
+    l: *const hathor_clap::sys::events::clap_input_events,
+    index: u32,
+) -> *const hathor_clap::sys::events::clap_event_header {
+    if l == core::ptr::from_ref(&HOT_LIST) {
+        // SAFETY: test storage filled under `serial()`, never mutated after
+        // publication.
+        unsafe {
+            match (*core::ptr::addr_of!(HOT))
+                .as_ref()
+                .and_then(|t| t.get(index as usize))
+            {
+                Some(ev) => core::ptr::from_ref(ev).cast(),
+                None => core::ptr::null(),
+            }
+        }
+    } else {
+        core::ptr::null()
+    }
+}
+
+static HOT_LIST: hathor_clap::sys::events::clap_input_events =
+    hathor_clap::sys::events::clap_input_events {
+        ctx: core::ptr::null_mut(),
+        size: Some(hot_size),
+        get: Some(hot_get),
+    };
+
 // ---- helpers ----
 
 fn expect<T: Copy>(slot: &Option<T>) -> T {
@@ -350,6 +403,102 @@ fn process_block(
                 f(plugin, core::ptr::from_ref(&proc))
             })
     }
+}
+
+/// The 64-bit twin of [`process_block`]: `data64` rows only, `data32` null.
+fn process_block64(
+    plugin: *const clap_plugin,
+    in0: &mut [f64; 64],
+    in1: &mut [f64; 64],
+    out0: &mut [f64; 64],
+    out1: &mut [f64; 64],
+    in_place: bool,
+) -> i32 {
+    let mut in_ptrs = [in0.as_mut_ptr(), in1.as_mut_ptr()];
+    let mut out_ptrs = if in_place {
+        [in0.as_mut_ptr(), in1.as_mut_ptr()]
+    } else {
+        [out0.as_mut_ptr(), out1.as_mut_ptr()]
+    };
+    let in_buf = clap_audio_buffer {
+        data32: core::ptr::null_mut(),
+        data64: in_ptrs.as_mut_ptr(),
+        channel_count: 2,
+        latency: 0,
+        constant_mask: 0,
+    };
+    let mut out_buf = clap_audio_buffer {
+        data32: core::ptr::null_mut(),
+        data64: out_ptrs.as_mut_ptr(),
+        channel_count: 2,
+        latency: 0,
+        constant_mask: 0,
+    };
+    let proc = clap_process {
+        steady_time: 0,
+        frames_count: 64,
+        transport: core::ptr::null(),
+        audio_inputs: &raw const in_buf,
+        audio_outputs: &raw mut out_buf,
+        audio_inputs_count: 1,
+        audio_outputs_count: 1,
+        in_events: core::ptr::null(),
+        out_events: core::ptr::null(),
+    };
+    // SAFETY: host-shaped struct; all arrays are stack locals alive for the
+    // call (this fn is the mock's own bookkeeping).
+    unsafe {
+        plugin
+            .as_ref()
+            .and_then(|p| p.process)
+            .map_or(CLAP_PROCESS_ERROR, |f| {
+                f(plugin, core::ptr::from_ref(&proc))
+            })
+    }
+}
+
+/// Drive the same `Plugin::process` directly on a typed instance through a
+/// fabricated view. Identical function to what the vtable reaches — used
+/// ONLY to read the neutral-fast flag, which the C door cannot expose.
+fn drive_typed(
+    p: &mut EqPlugin,
+    in0: &mut [f32; 64],
+    in1: &mut [f32; 64],
+    out0: &mut [f32; 64],
+    out1: &mut [f32; 64],
+) -> hathor_clap::ProcessStatus {
+    use hathor_clap::{Plugin as _, ProcessView};
+    let mut in_ptrs = [in0.as_mut_ptr(), in1.as_mut_ptr()];
+    let mut out_ptrs = [out0.as_mut_ptr(), out1.as_mut_ptr()];
+    let in_buf = clap_audio_buffer {
+        data32: in_ptrs.as_mut_ptr(),
+        data64: core::ptr::null_mut(),
+        channel_count: 2,
+        latency: 0,
+        constant_mask: 0,
+    };
+    let mut out_buf = clap_audio_buffer {
+        data32: out_ptrs.as_mut_ptr(),
+        data64: core::ptr::null_mut(),
+        channel_count: 2,
+        latency: 0,
+        constant_mask: 0,
+    };
+    let proc = clap_process {
+        steady_time: 0,
+        frames_count: 64,
+        transport: core::ptr::null(),
+        audio_inputs: &raw const in_buf,
+        audio_outputs: &raw mut out_buf,
+        audio_inputs_count: 1,
+        audio_outputs_count: 1,
+        in_events: core::ptr::null(),
+        out_events: core::ptr::null(),
+    };
+    // SAFETY: stack locals alive for the call; well-formed by construction
+    // (the same discipline as the unit tests' `drive`).
+    let mut view = unsafe { ProcessView::from_sys(&proc, 48_000.0) };
+    p.process(&mut view)
 }
 
 fn tone(i: usize) -> (f32, f32) {
@@ -534,10 +683,12 @@ fn eq_lifecycle_through_the_c_abi() {
     );
     assert_eq!(&out1[..], &in1b[..]);
 
-    // In-place pair: the host hands the same rows. The neutral chain still
-    // runs (identity biquads rewriting the same bits), so "untouched" here
-    // means bit-identical content, not an unwritten buffer — an EQ is not a
-    // pass-through plugin and the assert must say what it actually proves.
+    // In-place pair: the host hands the same rows. With the neutral fast
+    // path (task-11) the plugin does not touch the rows at all — "untouched"
+    // means literally UNWRITTEN now, and the assert below proves exactly
+    // that. Before the fast path it meant bit-identical content rewritten by
+    // identity biquads; `hot_bands_pass_the_strict_guard_at_both_widths` is
+    // what keeps the WRITING path under the strict guard.
     let mut inp = [0.25f32; 64];
     let mut inq = [-0.125f32; 64];
     let mut dummy = [-7.0f32; 64];
@@ -672,4 +823,135 @@ fn create_paths_stay_clean() {
             destroy(inst);
         }
     }
+}
+
+/// The STRICT guard must cover the REAL DSP path, not the copy shortcut:
+/// all 8 bands engaged through the host door (params flush), then 8+8
+/// guarded blocks — f32 rows and f64 rows — under `AudioSection`. A typed
+/// probe asserts the neutral-fast flag stays DOWN while a band is alive and
+/// re-arms only after a settle back to neutral: the flag is the proof-of-
+/// path the guard needs (task-11 follow-up demanded by the lead — a guard
+/// that passes covering LESS is worse than one that fails).
+#[test]
+fn hot_bands_pass_the_strict_guard_at_both_widths() {
+    use hathor_clap::{create_instance, Plugin as _, ProcessStatus};
+    let _st = serial(); // the mock host's globals; HOT publication included
+    fill_hot_events();
+    let id = <EqPlugin as hathor_clap::Plugin>::DESCRIPTOR.id;
+    let plugin = unsafe {
+        // SAFETY: our own descriptor id; null host is allowed (no logging
+        // path runs here); the instance is destroyed exactly once below.
+        create_instance::<EqPlugin>(core::ptr::null(), id)
+    };
+    assert!(!plugin.is_null());
+    assert!(
+        unsafe { expect(&plugin.as_ref().expect("inst").activate)(plugin, 48_000.0, 64, 64) },
+        "activate on the hot instance"
+    );
+    let params: *const clap_plugin_params = ext_of(plugin, CLAP_EXT_PARAMS).cast();
+    assert!(!params.is_null(), "params extension must answer");
+    unsafe {
+        // SAFETY: valid instance, our own static lists; null output list is
+        // the allowed shape.
+        expect(&(*params).flush)(plugin, &raw const HOT_LIST, &raw const NULL_OUT_LIST)
+    };
+
+    // Settle the 128-frame ramps OUTSIDE the section (warm-up may breathe;
+    // the guarded blocks must not allocate).
+    let mut a = [0.25f32; 64];
+    let mut b = [-0.125f32; 64];
+    let mut c = [0.0f32; 64];
+    let mut d = [0.0f32; 64];
+    for _ in 0..4 {
+        assert_eq!(
+            process_block(plugin, &mut a, &mut b, &mut c, &mut d, false),
+            CLAP_PROCESS_CONTINUE
+        );
+    }
+    let sec = AudioSection::enter().expect("outermost section");
+    let mut st = CLAP_PROCESS_ERROR;
+    for _ in 0..8 {
+        st = process_block(plugin, &mut a, &mut b, &mut c, &mut d, false);
+    }
+    let f32_allocs = sec.allocs_here();
+    drop(sec);
+    assert_eq!(st, CLAP_PROCESS_CONTINUE);
+    assert_eq!(
+        f32_allocs, 0,
+        "hot f32 recursions: zero allocations over 8 blocks"
+    );
+
+    // The same at double width: convert-in / filter / convert-out through
+    // the activate-sized scratch — zero fresh allocations is the claim.
+    let mut a64 = [0.25f64; 64];
+    let mut b64 = [-0.125f64; 64];
+    let mut c64 = [0.0f64; 64];
+    let mut d64 = [0.0f64; 64];
+    for _ in 0..4 {
+        assert_eq!(
+            process_block64(plugin, &mut a64, &mut b64, &mut c64, &mut d64, false),
+            CLAP_PROCESS_CONTINUE
+        );
+    }
+    let sec = AudioSection::enter().expect("outermost section");
+    let mut st = CLAP_PROCESS_ERROR;
+    for _ in 0..8 {
+        st = process_block64(plugin, &mut a64, &mut b64, &mut c64, &mut d64, false);
+    }
+    let f64_allocs = sec.allocs_here();
+    drop(sec);
+    assert_eq!(st, CLAP_PROCESS_CONTINUE);
+    assert_eq!(
+        f64_allocs, 0,
+        "hot f64 scratch detour: zero allocations over 8 blocks"
+    );
+
+    let destroy = unsafe {
+        // SAFETY: `plugin` is the live instance we created.
+        expect(&plugin.as_ref().expect("inst").destroy)
+    };
+    // SAFETY: instance we created; destroyed exactly once.
+    unsafe { destroy(plugin) };
+
+    // Proof-of-path on the typed object (the flag is invisible through the
+    // vtable — same `process`, one extra window into its state).
+    let mut q = EqPlugin::instantiate();
+    assert!(q.activate(48_000.0, 64, 64));
+    assert!(
+        q.is_neutral_fast(),
+        "fresh neutral instance: fast flag armed"
+    );
+    q.set_param_value(2, 1.0); // band 1 LowPass
+    q.set_param_value(3, 1_000.0);
+    assert!(
+        !q.is_neutral_fast(),
+        "engagement must clear the flag immediately"
+    );
+    let mut ta = [0.25f32; 64];
+    let mut tb = [0.25f32; 64];
+    let mut tc = [0.0f32; 64];
+    let mut td = [0.0f32; 64];
+    for _ in 0..6 {
+        assert_eq!(
+            drive_typed(&mut q, &mut ta, &mut tb, &mut tc, &mut td),
+            ProcessStatus::Continue
+        );
+    }
+    assert!(
+        !q.is_neutral_fast(),
+        "a live band never re-arms the flag: the recursion is what ran"
+    );
+    // The return trip: off means ramping first, settled copy only later.
+    q.set_param_value(2, 0.0); // Type -> Off: ramp back to IDENTITY
+    assert!(!q.is_neutral_fast(), "the return trip ramps: still hot");
+    for _ in 0..6 {
+        assert_eq!(
+            drive_typed(&mut q, &mut ta, &mut tb, &mut tc, &mut td),
+            ProcessStatus::Continue
+        );
+    }
+    assert!(
+        q.is_neutral_fast(),
+        "settled neutral re-arms the copy fast path (flag tracks reality)"
+    );
 }

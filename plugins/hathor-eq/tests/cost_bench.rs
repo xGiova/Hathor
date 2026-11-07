@@ -121,6 +121,49 @@ fn call_process(
     unsafe { process(plugin, core::ptr::from_ref(&proc)) }
 }
 
+/// The 64-bit twin of [`call_process`]: `data64` rows only. Same borrowing
+/// discipline, same lifetime: everything here dies with the call.
+fn call_process64(
+    plugin: *const clap_plugin,
+    process: unsafe extern "C" fn(*const clap_plugin, *const clap_process) -> i32,
+    frames: u32,
+    in0: &mut [f64; 64],
+    in1: &mut [f64; 64],
+    out0: &mut [f64; 64],
+    out1: &mut [f64; 64],
+) -> i32 {
+    let mut inp = [in0.as_mut_ptr(), in1.as_mut_ptr()];
+    let mut outp = [out0.as_mut_ptr(), out1.as_mut_ptr()];
+    let in_buf = clap_audio_buffer {
+        data32: core::ptr::null_mut(),
+        data64: inp.as_mut_ptr(),
+        channel_count: 2,
+        latency: 0,
+        constant_mask: 0,
+    };
+    let mut out_buf = clap_audio_buffer {
+        data32: core::ptr::null_mut(),
+        data64: outp.as_mut_ptr(),
+        channel_count: 2,
+        latency: 0,
+        constant_mask: 0,
+    };
+    let proc = clap_process {
+        steady_time: 0,
+        frames_count: frames,
+        transport: core::ptr::null(),
+        audio_inputs: &raw const in_buf,
+        audio_outputs: &raw mut out_buf,
+        audio_inputs_count: 1,
+        audio_outputs_count: 1,
+        in_events: core::ptr::null(),
+        out_events: core::ptr::null(),
+    };
+    // SAFETY: raw pointers into this frame only; the wrapper uses them
+    // strictly for the duration of the call.
+    unsafe { process(plugin, core::ptr::from_ref(&proc)) }
+}
+
 /// Open all 8 bands through the params extension's `flush`, as a host does.
 fn wake_the_bands(plugin: *const clap_plugin) {
     let instance = unsafe {
@@ -168,8 +211,8 @@ fn wake_the_bands(plugin: *const clap_plugin) {
 }
 
 /// Create an instance through the audited wrapper path and run one measured
-/// case: `rate` Hz, bands all active if `full_bands`.
-fn run_case(rate: f64, full_bands: bool) {
+/// case: `rate` Hz, bands all active if `full_bands`, f64 rows if `wide`.
+fn run_case(rate: f64, full_bands: bool, wide: bool) {
     let budget_us = 64.0f64 / rate * 1e6;
     let plugin: *const clap_plugin = unsafe {
         // SAFETY: our own descriptor id string; a null host is allowed by
@@ -199,23 +242,39 @@ fn run_case(rate: f64, full_bands: bool) {
     let mut in1 = [-0.25f32; 64];
     let mut out0 = [0f32; 64];
     let mut out1 = [0f32; 64];
+    let mut d0 = [0.5f64; 64];
+    let mut d1 = [-0.25f64; 64];
+    let mut e0 = [0f64; 64];
+    let mut e1 = [0f64; 64];
+
+    macro_rules! block {
+        ($frames:expr) => {
+            if wide {
+                call_process64(plugin, process, $frames, &mut d0, &mut d1, &mut e0, &mut e1)
+            } else {
+                call_process(
+                    plugin, process, $frames, &mut in0, &mut in1, &mut out0, &mut out1,
+                )
+            }
+        };
+    }
 
     // Warm-up outside the clock: caches, branch predictors, and the 128-frame
     // coefficient ramp the full-bands case just started.
     for _ in 0..512 {
-        let st = call_process(
-            plugin, process, 64, &mut in0, &mut in1, &mut out0, &mut out1,
-        );
+        let st = block!(64);
         assert_eq!(st, CLAP_PROCESS_CONTINUE);
     }
 
     let t = Instant::now();
     for _ in 0..ROUNDS {
-        let st = call_process(
-            plugin, process, 64, &mut in0, &mut in1, &mut out0, &mut out1,
-        );
+        let st = block!(64);
         assert_eq!(st, CLAP_PROCESS_CONTINUE);
-        black_box(&out0);
+        if wide {
+            black_box(&e0);
+        } else {
+            black_box(&out0);
+        }
     }
     let full_us = t.elapsed().as_secs_f64() * 1e6 / ROUNDS as f64;
 
@@ -223,9 +282,13 @@ fn run_case(rate: f64, full_bands: bool) {
     // floor, so the DSP share is (full − floor).
     let t = Instant::now();
     for _ in 0..ROUNDS {
-        let st = call_process(plugin, process, 0, &mut in0, &mut in1, &mut out0, &mut out1);
+        let st = block!(0);
         assert_eq!(st, CLAP_PROCESS_CONTINUE);
-        black_box(&out0);
+        if wide {
+            black_box(&e0);
+        } else {
+            black_box(&out0);
+        }
     }
     let floor_us = t.elapsed().as_secs_f64() * 1e6 / ROUNDS as f64;
 
@@ -234,8 +297,9 @@ fn run_case(rate: f64, full_bands: bool) {
     } else {
         "all bands off"
     };
+    let width = if wide { "f64" } else { "f32" };
     println!(
-        "MEASURED eq path [{shape}] @{rate:.0} Hz: {full_us:.2} µs/block @64f — {:.2}% of one core (budget {budget_us:.1} µs; wrapper+view floor {floor_us:.2} µs)",
+        "MEASURED eq path [{shape} {width}] @{rate:.0} Hz: {full_us:.2} µs/block @64f — {:.2}% of one core (budget {budget_us:.1} µs; wrapper+view floor {floor_us:.2} µs)",
         full_us / budget_us * 100.0
     );
 
@@ -249,8 +313,15 @@ fn run_case(rate: f64, full_bands: bool) {
 #[test]
 #[ignore = "timing probe: run explicitly with --release -- --ignored --nocapture"]
 fn eq_path_cost_per_block() {
-    run_case(48_000.0, false);
-    run_case(48_000.0, true);
-    run_case(96_000.0, false);
-    run_case(96_000.0, true);
+    run_case(48_000.0, false, false);
+    run_case(48_000.0, true, false);
+    run_case(96_000.0, false, false);
+    run_case(96_000.0, true, false);
+    // The 64-bit host (task-11): convert + filter + convert back. The
+    // neutral case exercises the ratified invariant branch (direct f64
+    // copy, scratch untouched); the active cases pay the declared detour.
+    run_case(48_000.0, false, true);
+    run_case(48_000.0, true, true);
+    run_case(96_000.0, false, true);
+    run_case(96_000.0, true, true);
 }

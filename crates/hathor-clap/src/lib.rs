@@ -98,4 +98,4 @@ pub use host::{Host, LogSeverity};
 pub use plugin::{
     create_instance, AudioPortInfo, InputStream, OutputStream, ParamInfo, ParamText, Plugin,
 };
-pub use process::{ProcessStatus, ProcessView};
+pub use process::{ProcessStatus, ProcessView, SampleFormat};

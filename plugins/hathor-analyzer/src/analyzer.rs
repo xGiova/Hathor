@@ -31,7 +31,7 @@ use hathor_clap::sys::ext::params::CLAP_PARAM_IS_AUTOMATABLE;
 use hathor_clap::sys::plugin::clap_plugin_descriptor;
 use hathor_clap::{
     clap_cstr, make_descriptor, AudioPortInfo, FeatureList, Host, InputStream, LogSeverity,
-    OutputStream, ParamInfo, ParamText, Plugin, ProcessStatus, ProcessView,
+    OutputStream, ParamInfo, ParamText, Plugin, ProcessStatus, ProcessView, SampleFormat,
 };
 
 use hathor_dsp_fft::bank::{BankParams, FftBank, TierTuning, DEFAULT_BINS};
@@ -243,11 +243,112 @@ impl AnalyzerPlugin {
             }
             None => self.mono[..frames].copy_from_slice(l),
         }
+        self.analyze_mono(frames)
+    }
+
+    /// 64-bit sibling of [`Self::downmix_and_analyze`]: the stereo add happens
+    /// in f64 — host precision kept as long as it can be — and the single
+    /// narrowing cast lands in the scratch. The bank is f32 by design (the
+    /// task-4 decision); 24-bit audio is the real precision floor anyway, so
+    /// this cast loses nothing below the noise of the format.
+    fn downmix64_and_analyze(&mut self, l: &[f64], r: Option<&[f64]>) -> ProcessStatus {
+        if !self.active {
+            return ProcessStatus::Error;
+        }
+        let frames = l.len();
+        if frames == 0 {
+            return ProcessStatus::Continue;
+        }
+        if frames > self.mono.len() {
+            return ProcessStatus::Error;
+        }
+        if r.is_some_and(|x| x.len() != frames) {
+            return ProcessStatus::Error;
+        }
+        match r {
+            Some(rr) => {
+                for (m, (&x, &y)) in self.mono[..frames].iter_mut().zip(l.iter().zip(rr)) {
+                    *m = (0.5 * (x + y)) as f32;
+                }
+            }
+            None => {
+                for (m, &x) in self.mono[..frames].iter_mut().zip(l) {
+                    *m = x as f32;
+                }
+            }
+        }
+        self.analyze_mono(frames)
+    }
+
+    /// The shared tail: feed the bank exactly the scratch prefix, allocation-
+    /// free. Both width paths arrive here — one analysis core, two wires.
+    fn analyze_mono(&mut self, frames: usize) -> ProcessStatus {
         let Some(bank) = &mut self.bank else {
             return ProcessStatus::Error;
         };
         bank.process(&self.mono[..frames]);
         ProcessStatus::Continue
+    }
+
+    /// The f32 world: unchanged from task-4's shipping path.
+    fn run32(&mut self, io: &mut ProcessView<'_>, in_ch: usize, out_ch: usize) -> ProcessStatus {
+        // Input rows first: `&'a` slices that outlive further borrows of `io`.
+        let Some(l) = io.input_channel(0, 0) else {
+            return ProcessStatus::Error;
+        };
+        let r = if in_ch >= 2 {
+            io.input_channel(0, 1)
+        } else {
+            None
+        };
+        // In-place pair (we advertise it): the output rows ARE the input rows
+        // — touching them would alter the sound we promise to leave alone, so
+        // pass-through becomes the no-op the host already performed for us.
+        if !io.out_aliases_in() {
+            let Some(o0) = io.output_channel(0, 0) else {
+                return ProcessStatus::Error;
+            };
+            o0.copy_from_slice(l);
+            if out_ch >= 2 {
+                let Some(o1) = io.output_channel(0, 1) else {
+                    return ProcessStatus::Error;
+                };
+                match r {
+                    Some(rr) => o1.copy_from_slice(rr),
+                    None => o1.fill(0.0),
+                }
+            }
+        }
+        self.downmix_and_analyze(l, r)
+    }
+
+    /// The f64 world: the same pass-through at double width, bit-exact both
+    /// ways (a `copy_from_slice` of doubles moves the host's own bytes).
+    fn run64(&mut self, io: &mut ProcessView<'_>, in_ch: usize, out_ch: usize) -> ProcessStatus {
+        let Some(l) = io.input_channel_f64(0, 0) else {
+            return ProcessStatus::Error;
+        };
+        let r = if in_ch >= 2 {
+            io.input_channel_f64(0, 1)
+        } else {
+            None
+        };
+        if !io.out_aliases_in() {
+            let Some(o0) = io.output_channel_f64(0, 0) else {
+                return ProcessStatus::Error;
+            };
+            o0.copy_from_slice(l);
+            if out_ch >= 2 {
+                let Some(o1) = io.output_channel_f64(0, 1) else {
+                    return ProcessStatus::Error;
+                };
+                match r {
+                    Some(rr) => o1.copy_from_slice(rr),
+                    None => o1.fill(0.0),
+                }
+            }
+        }
+        self.downmix64_and_analyze(l, r)
     }
 }
 
@@ -347,10 +448,16 @@ impl Plugin for AnalyzerPlugin {
         }
     }
 
-    /// Thin adapter: pull the CLAP rows into slices, run the pass-through
-    /// (row by row — the view hands out one mutable row at a time), then the
-    /// shared [`Self::downmix_and_analyze`] core. This is THE audio path: the
-    /// spectrum tests fabricate a `clap_process` and drive exactly this.
+    /// Thin adapter: pull the CLAP rows, run the pass-through (row by row —
+    /// the view hands out one mutable row at a time), then the shared
+    /// [`Self::analyze_mono`] core. This is THE audio path: the spectrum
+    /// tests fabricate a `clap_process` and drive exactly this.
+    ///
+    /// Both wire widths are served, chosen from each port's pointer pair
+    /// (`channel_format`): f32 rows run the shipping path; f64 rows pass
+    /// through bit-exact and downmix in f64 before one cast. A port that
+    /// breaks the XOR, or in/out ports of different widths, is refused
+    /// (Error): the plugin never guesses what a malformed host meant.
     fn process(&mut self, io: &mut ProcessView<'_>) -> ProcessStatus {
         if !self.active {
             return ProcessStatus::Error;
@@ -369,34 +476,11 @@ impl Plugin for AnalyzerPlugin {
             Some(c) if c >= 1 => c as usize,
             _ => return ProcessStatus::Error,
         };
-        // Input rows first: `&'a` slices that outlive further borrows of `io`.
-        let Some(l) = io.input_channel(0, 0) else {
-            return ProcessStatus::Error;
-        };
-        let r = if in_ch >= 2 {
-            io.input_channel(0, 1)
-        } else {
-            None
-        };
-        // In-place pair (we advertise it): the output rows ARE the input rows
-        // — touching them would alter the sound we promise to leave alone, so
-        // pass-through becomes the no-op the host already performed for us.
-        if !io.out_aliases_in() {
-            let Some(o0) = io.output_channel(0, 0) else {
-                return ProcessStatus::Error;
-            };
-            o0.copy_from_slice(l);
-            if out_ch >= 2 {
-                let Some(o1) = io.output_channel(0, 1) else {
-                    return ProcessStatus::Error;
-                };
-                match r {
-                    Some(rr) => o1.copy_from_slice(rr),
-                    None => o1.fill(0.0),
-                }
-            }
+        match (io.channel_format(0, true), io.channel_format(0, false)) {
+            (Some(SampleFormat::F32), Some(SampleFormat::F32)) => self.run32(io, in_ch, out_ch),
+            (Some(SampleFormat::F64), Some(SampleFormat::F64)) => self.run64(io, in_ch, out_ch),
+            _ => ProcessStatus::Error, // malformed XOR or mixed widths: refuse, never guess
         }
-        self.downmix_and_analyze(l, r)
     }
 
     // ---- ports ----

@@ -44,7 +44,7 @@ use hathor_clap::sys::ext::params::CLAP_PARAM_IS_AUTOMATABLE;
 use hathor_clap::sys::plugin::clap_plugin_descriptor;
 use hathor_clap::{
     clap_cstr, make_descriptor, AudioPortInfo, FeatureList, Host, InputStream, LogSeverity,
-    OutputStream, ParamInfo, ParamText, Plugin, ProcessStatus, ProcessView,
+    OutputStream, ParamInfo, ParamText, Plugin, ProcessStatus, ProcessView, SampleFormat,
 };
 
 use hathor_dsp_filters::biquad::Biquad;
@@ -271,6 +271,18 @@ pub struct EqPlugin {
     sample_rate: f32,
     max_frames: usize,
     active: bool,
+    /// 64-bit host path (task-11): one f32 row of scratch per channel, sized
+    /// at `activate` like `lanes`. A 64-bit host's f64 rows meet the f32
+    /// biquad lanes here: convert in, filter, convert out — declared setup
+    /// allocation, zero allocations in `process`, the analyzer's mono-scratch
+    /// doctrine with one row each.
+    scratch_a: Vec<f32>,
+    scratch_b: Vec<f32>,
+    /// True only when all 16 lanes rest at `IDENTITY`, no ramp runs, and the
+    /// trim is exactly 1.0: the process flow then copies rows at the host's
+    /// own width and freezes the lanes — see [`Self::refresh_neutral_flag`],
+    /// the ratified task-11 invariant. Derived state, never saved.
+    neutral_fast: bool,
 }
 
 impl EqPlugin {
@@ -309,6 +321,29 @@ impl EqPlugin {
                 self.lanes[2 * b + 1].ramp_to(target, RAMP_FRAMES);
             }
         }
+        if i != 0 {
+            // Any lane/design edit re-evaluates the fast flag (mid-ramp the
+            // test fails → false; edits back to neutral flip it once the
+            // ramps land — see `refresh_neutral_flag`).
+            self.refresh_neutral_flag();
+        }
+    }
+
+    /// Re-evaluate the neutral fast-path flag (task-11, ratified invariant):
+    /// neutral means every lane at rest on `IDENTITY` coefficients, no ramp
+    /// running, and the trim exactly 1.0. While the flag is on a 64-bit host
+    /// gets a direct f64→f64 row copy — bit-exact even for samples the f32
+    /// scratch could not represent (1/3, sqrt(2), subnormals) — and an f32
+    /// host gets the same bytes from the identity copy without ever touching
+    /// a filter recursion. Lanes frozen here is the exact doctrine the
+    /// shipping bypass freeze already establishes (task-10): nothing ramps,
+    /// so nothing advances; the first edit after a neutral stretch ramps
+    /// from these frozen coefficients, same as after any bypassed stretch.
+    fn refresh_neutral_flag(&mut self) {
+        self.neutral_fast = !self.lanes.is_empty()
+            && !self.lanes.iter().any(Biquad::is_ramping)
+            && self.lanes.iter().all(|l| l.coeffs() == Coeffs::IDENTITY)
+            && self.master_lin == 1.0;
     }
 
     /// The 34 params, little-endian — the whole saved state.
@@ -338,6 +373,9 @@ impl EqPlugin {
                 self.lanes[2 * b].ramp_to(target, RAMP_FRAMES);
                 self.lanes[2 * b + 1].ramp_to(target, RAMP_FRAMES);
             }
+            // Restoring a neutral project leaves ramps running; the flag
+            // re-arms itself on the first settled block (process tail).
+            self.refresh_neutral_flag();
         }
     }
 
@@ -359,94 +397,18 @@ impl EqPlugin {
     pub fn is_bypassed(&self) -> bool {
         self.params[PASS_IDX] >= 0.5
     }
-}
 
-const PASS_IDX: usize = PARAM_BYPASS as usize;
-
-impl Plugin for EqPlugin {
-    const DESCRIPTOR: &'static clap_plugin_descriptor = &DESCRIPTOR;
-
-    fn instantiate() -> Self {
-        Self {
-            host: None,
-            params: default_params(),
-            lanes: Vec::new(),
-            master_lin: 1.0,
-            sample_rate: 0.0,
-            max_frames: 0,
-            active: false,
-        }
+    /// Diagnostic (task-11): is the neutral copy fast-path armed? The strict
+    /// zero-allocation tests assert `false` here while bands are engaged —
+    /// the flag is the proof-of-path the guard needs: with it down, the
+    /// biquad recursions are what ran; with it up, only copies did.
+    pub fn is_neutral_fast(&self) -> bool {
+        self.neutral_fast
     }
 
-    fn init(&mut self, host: Host) -> bool {
-        let logged = host.log(LogSeverity::Info, clap_cstr!("hathor-eq init"));
-        self.host = Some(host);
-        // A host without `clap.log` is still a valid host: log failure is
-        // not an init failure.
-        let _ = logged;
-        true
-    }
-
-    fn activate(&mut self, sample_rate: f64, _min_frames: u32, max_frames: u32) -> bool {
-        // The honest operating envelope for a fixed-topology biquad EQ.
-        // Below 8 kHz an EQ is a rumor; above 192 kHz this v0 is untested
-        // territory — refuse rather than pretend.
-        if !sample_rate.is_finite() || !(8_000.0..=192_000.0).contains(&sample_rate) {
-            return false;
-        }
-        if max_frames == 0 || max_frames > 1 << 20 {
-            return false;
-        }
-        self.sample_rate = sample_rate as f32;
-        self.max_frames = max_frames as usize;
-        // Setup allocation, declared and bounded: 16 lanes, once.
-        let mut lanes = Vec::with_capacity(BANDS * 2);
-        for b in 0..BANDS {
-            let target = self.band_target(b);
-            lanes.push(Biquad::new(target));
-            lanes.push(Biquad::new(target));
-        }
-        self.lanes = lanes;
-        self.master_lin = db_to_lin(self.params[1] as f32);
-        self.active = true;
-        true
-    }
-
-    fn deactivate(&mut self) {
-        self.lanes = Vec::new();
-        self.active = false;
-    }
-
-    fn reset(&mut self) {
-        for lane in &mut self.lanes {
-            lane.reset();
-        }
-    }
-
-    /// THE audio path: copy (unless the host handed the in-place pair),
-    /// then per output row its channel's 8 lanes, then the master trim.
-    /// With every band `Off` the lanes are `IDENTITY` biquads and the trim
-    /// is exactly 1.0, so the default chain is bit-exact — which is what
-    /// the integration test asserts over random audio.
-    fn process(&mut self, io: &mut ProcessView<'_>) -> ProcessStatus {
-        if !self.active {
-            return ProcessStatus::Error;
-        }
-        let frames = io.frames();
-        if frames > self.max_frames {
-            // Host exceeded the max block promised at `activate` (spec
-            // violation; hosts expected NOT VERIFIED): refuse BEFORE
-            // writing, so a failed block is an untouched block.
-            return ProcessStatus::Error;
-        }
-        let in_ch = match io.port_channels(0, true) {
-            Some(c) if c >= 1 => c as usize,
-            _ => return ProcessStatus::Error,
-        };
-        let out_ch = match io.port_channels(0, false) {
-            Some(c) if c >= 1 => c as usize,
-            _ => return ProcessStatus::Error,
-        };
+    /// The f32 world: unchanged from the day the crate shipped, plus the
+    /// neutral fast flag (both are copies, never recursions).
+    fn run32(&mut self, io: &mut ProcessView<'_>, in_ch: usize, out_ch: usize) -> ProcessStatus {
         // Input rows first: `&'a` slices independent of further `io` borrows.
         let Some(l) = io.input_channel(0, 0) else {
             return ProcessStatus::Error;
@@ -478,6 +440,11 @@ impl Plugin for EqPlugin {
             // Bypassed: lanes frozen, output already the untouched copy.
             return ProcessStatus::Continue;
         }
+        if self.neutral_fast {
+            // The host's bytes ARE the identity chain's output (task-11
+            // invariant): skip the recursion, lanes stay frozen.
+            return ProcessStatus::Continue;
+        }
         // One mutable row at a time (the view's discipline), one lane set
         // per channel (the filters crate's discipline).
         if let Some(o0) = io.output_channel(0, 0) {
@@ -502,7 +469,258 @@ impl Plugin for EqPlugin {
                 }
             }
         }
+        self.refresh_neutral_flag();
         ProcessStatus::Continue
+    }
+
+    /// The f64 world: the same lanes, reached through the activate-sized
+    /// scratch. In-place pairs keep their double-width pass-through (frozen
+    /// bytes when bypassed or neutral); hot blocks convert row→scratch→row.
+    /// `0.5` of a value representable in f32 stays bit-exact across both
+    /// casts — but the invariant test uses values NOT representable in f32,
+    /// because those are the ones that would catch a stray detour.
+    fn run64(&mut self, io: &mut ProcessView<'_>, in_ch: usize, out_ch: usize) -> ProcessStatus {
+        let n = io.frames();
+        let Some(l) = io.input_channel_f64(0, 0) else {
+            return ProcessStatus::Error;
+        };
+        let r = if in_ch >= 2 {
+            io.input_channel_f64(0, 1)
+        } else {
+            None
+        };
+        if self.is_bypassed() {
+            // Frozen pass-through at double width: the host's own bytes, no
+            // scratch, no ramp advance.
+            if !io.out_aliases_in() {
+                let Some(o0) = io.output_channel_f64(0, 0) else {
+                    return ProcessStatus::Error;
+                };
+                o0.copy_from_slice(l);
+                if out_ch >= 2 {
+                    let Some(o1) = io.output_channel_f64(0, 1) else {
+                        return ProcessStatus::Error;
+                    };
+                    match r {
+                        Some(rr) => o1.copy_from_slice(rr),
+                        None => o1.fill(0.0),
+                    }
+                }
+            }
+            return ProcessStatus::Continue;
+        }
+        let aliased = io.out_aliases_in();
+        if self.neutral_fast {
+            // Ratified invariant (task-11): the neutral 64-bit chain never
+            // detours through the f32 scratch — copy at the host's own
+            // width (or, in-place, leave the host's bytes alone), exactly
+            // like the bypass branch above. A conversion here would round
+            // 1/3, sqrt(2) and subnormals; the hostile-values test proves
+            // the detour is absent by construction.
+            if !aliased {
+                let Some(o0) = io.output_channel_f64(0, 0) else {
+                    return ProcessStatus::Error;
+                };
+                o0.copy_from_slice(l);
+                if out_ch >= 2 {
+                    let Some(o1) = io.output_channel_f64(0, 1) else {
+                        return ProcessStatus::Error;
+                    };
+                    match r {
+                        Some(rr) => o1.copy_from_slice(rr),
+                        None => o1.fill(0.0),
+                    }
+                }
+            }
+            return ProcessStatus::Continue;
+        }
+        // Channel 0. The scratch borrows `self.scratch_a`, the lanes borrow
+        // `self.lanes` — disjoint fields, the borrow checker is fine with the
+        // interleaving as written below (one scope per channel).
+        {
+            let sc = &mut self.scratch_a[..n];
+            if aliased {
+                // In-place: the output row already carries the input.
+                let Some(o0) = io.output_channel_f64(0, 0) else {
+                    return ProcessStatus::Error;
+                };
+                for (s, &x) in sc.iter_mut().zip(o0.iter()) {
+                    *s = x as f32;
+                }
+            } else {
+                for (s, &x) in sc.iter_mut().zip(l.iter()) {
+                    *s = x as f32;
+                }
+            }
+            for b in 0..BANDS {
+                self.lanes[2 * b].process(sc);
+            }
+            if self.master_lin != 1.0 {
+                for x in sc.iter_mut() {
+                    *x *= self.master_lin;
+                }
+            }
+        }
+        let Some(o0) = io.output_channel_f64(0, 0) else {
+            return ProcessStatus::Error;
+        };
+        for (d, &s) in o0.iter_mut().zip(self.scratch_a[..n].iter()) {
+            *d = s as f64;
+        }
+        // Channel 1 (stereo out): sourced from the right row, or silence for
+        // mono in — the routing doctrine, unchanged at either width.
+        if out_ch >= 2 {
+            {
+                let sc = &mut self.scratch_b[..n];
+                if aliased {
+                    let Some(o1) = io.output_channel_f64(0, 1) else {
+                        return ProcessStatus::Error;
+                    };
+                    for (s, &x) in sc.iter_mut().zip(o1.iter()) {
+                        *s = x as f32;
+                    }
+                } else {
+                    match r {
+                        Some(rr) => {
+                            for (s, &x) in sc.iter_mut().zip(rr.iter()) {
+                                *s = x as f32;
+                            }
+                        }
+                        None => {
+                            for s in sc.iter_mut() {
+                                *s = 0.0;
+                            }
+                        }
+                    }
+                }
+                for b in 0..BANDS {
+                    self.lanes[2 * b + 1].process(sc);
+                }
+                if self.master_lin != 1.0 {
+                    for x in sc.iter_mut() {
+                        *x *= self.master_lin;
+                    }
+                }
+            }
+            let Some(o1) = io.output_channel_f64(0, 1) else {
+                return ProcessStatus::Error;
+            };
+            for (d, &s) in o1.iter_mut().zip(self.scratch_b[..n].iter()) {
+                *d = s as f64;
+            }
+        }
+        self.refresh_neutral_flag();
+        ProcessStatus::Continue
+    }
+}
+
+const PASS_IDX: usize = PARAM_BYPASS as usize;
+
+impl Plugin for EqPlugin {
+    const DESCRIPTOR: &'static clap_plugin_descriptor = &DESCRIPTOR;
+
+    fn instantiate() -> Self {
+        Self {
+            host: None,
+            params: default_params(),
+            lanes: Vec::new(),
+            master_lin: 1.0,
+            sample_rate: 0.0,
+            max_frames: 0,
+            active: false,
+            scratch_a: Vec::new(),
+            scratch_b: Vec::new(),
+            neutral_fast: false,
+        }
+    }
+
+    fn init(&mut self, host: Host) -> bool {
+        let logged = host.log(LogSeverity::Info, clap_cstr!("hathor-eq init"));
+        self.host = Some(host);
+        // A host without `clap.log` is still a valid host: log failure is
+        // not an init failure.
+        let _ = logged;
+        true
+    }
+
+    fn activate(&mut self, sample_rate: f64, _min_frames: u32, max_frames: u32) -> bool {
+        // The honest operating envelope for a fixed-topology biquad EQ.
+        // Below 8 kHz an EQ is a rumor; above 192 kHz this v0 is untested
+        // territory — refuse rather than pretend.
+        if !sample_rate.is_finite() || !(8_000.0..=192_000.0).contains(&sample_rate) {
+            return false;
+        }
+        if max_frames == 0 || max_frames > 1 << 20 {
+            return false;
+        }
+        self.sample_rate = sample_rate as f32;
+        self.max_frames = max_frames as usize;
+        // Setup allocation, declared and bounded: 16 lanes + two scratch rows, once.
+        let mut lanes = Vec::with_capacity(BANDS * 2);
+        for b in 0..BANDS {
+            let target = self.band_target(b);
+            lanes.push(Biquad::new(target));
+            lanes.push(Biquad::new(target));
+        }
+        self.lanes = lanes;
+        self.scratch_a = vec![0.0f32; self.max_frames];
+        self.scratch_b = vec![0.0f32; self.max_frames];
+        self.master_lin = db_to_lin(self.params[1] as f32);
+        self.active = true;
+        self.refresh_neutral_flag();
+        true
+    }
+
+    fn deactivate(&mut self) {
+        self.lanes = Vec::new();
+        self.scratch_a = Vec::new();
+        self.scratch_b = Vec::new();
+        self.neutral_fast = false;
+        self.active = false;
+    }
+
+    fn reset(&mut self) {
+        for lane in &mut self.lanes {
+            lane.reset();
+        }
+    }
+
+    /// THE audio path: copy (unless the host handed the in-place pair),
+    /// then per output row its channel's 8 lanes, then the master trim.
+    /// With every band `Off` the lanes are `IDENTITY` biquads and the trim
+    /// is exactly 1.0, so the default chain is bit-exact — which is what
+    /// the integration test asserts over random audio.
+    ///
+    /// Both wire widths are served, chosen from each port's pointer pair
+    /// (task-11): the f32 world runs the shipping path; the f64 world flows
+    /// through the scratch — convert in, the SAME lanes, convert out. Bands
+    /// ramp identically in both (the ramps ride the lanes, not the rows). A
+    /// port that breaks the XOR or a mixed-width pair is refused (Error):
+    /// no guessing on a malformed host's behalf.
+    fn process(&mut self, io: &mut ProcessView<'_>) -> ProcessStatus {
+        if !self.active {
+            return ProcessStatus::Error;
+        }
+        let frames = io.frames();
+        if frames > self.max_frames {
+            // Host exceeded the max block promised at `activate` (spec
+            // violation; hosts expected NOT VERIFIED): refuse BEFORE
+            // writing, so a failed block is an untouched block.
+            return ProcessStatus::Error;
+        }
+        let in_ch = match io.port_channels(0, true) {
+            Some(c) if c >= 1 => c as usize,
+            _ => return ProcessStatus::Error,
+        };
+        let out_ch = match io.port_channels(0, false) {
+            Some(c) if c >= 1 => c as usize,
+            _ => return ProcessStatus::Error,
+        };
+        match (io.channel_format(0, true), io.channel_format(0, false)) {
+            (Some(SampleFormat::F32), Some(SampleFormat::F32)) => self.run32(io, in_ch, out_ch),
+            (Some(SampleFormat::F64), Some(SampleFormat::F64)) => self.run64(io, in_ch, out_ch),
+            _ => ProcessStatus::Error, // malformed XOR or mixed widths: refuse, never guess
+        }
     }
 
     // ---- ports ----
@@ -675,6 +893,62 @@ mod tests {
         let mut p = EqPlugin::instantiate();
         assert!(p.activate(rate, 16, 64));
         p
+    }
+
+    /// 64-bit twin of [`drive`]: `data64` rows only, `data32` null — a
+    /// well-formed double-precision host per the wrapper's XOR doctrine.
+    fn drive64(
+        p: &mut EqPlugin,
+        in_ptrs: &mut [*mut f64],
+        out_ptrs: &mut [*mut f64],
+        frames: u32,
+        rate: f64,
+    ) -> ProcessStatus {
+        let in_buf = clap_audio_buffer {
+            data32: core::ptr::null_mut(),
+            data64: in_ptrs.as_mut_ptr(),
+            channel_count: in_ptrs.len() as u32,
+            latency: 0,
+            constant_mask: 0,
+        };
+        let mut out_buf = clap_audio_buffer {
+            data32: core::ptr::null_mut(),
+            data64: out_ptrs.as_mut_ptr(),
+            channel_count: out_ptrs.len() as u32,
+            latency: 0,
+            constant_mask: 0,
+        };
+        let proc = clap_process {
+            steady_time: 0,
+            frames_count: frames,
+            transport: core::ptr::null(),
+            audio_inputs: &raw const in_buf,
+            audio_outputs: &raw mut out_buf,
+            audio_inputs_count: 1,
+            audio_outputs_count: 1,
+            in_events: core::ptr::null(),
+            out_events: core::ptr::null(),
+        };
+        // SAFETY: same discipline as `drive`, at double width: the row
+        // arrays live in the caller's buffers for the whole call.
+        let mut view = unsafe { ProcessView::from_sys(&proc, rate) };
+        p.process(&mut view)
+    }
+
+    fn sine64(freq: f64, rate: f64, n: usize, offset_frames: usize) -> Vec<f64> {
+        (0..n)
+            .map(|k| {
+                let t = (offset_frames + k) as f64;
+                core::f64::consts::TAU * freq * t / rate
+            })
+            .map(f64::sin)
+            .map(|v| v * 0.5)
+            .collect()
+    }
+
+    fn rms64(x: &[f64]) -> f64 {
+        let acc: f64 = x.iter().map(|v| v * v).sum();
+        (acc / x.len().max(1) as f64).sqrt()
     }
 
     #[test]
@@ -1022,5 +1296,214 @@ mod tests {
         assert_eq!(st.q, 1.0);
         assert!(p.band_state(8).is_none());
         assert_eq!(TYPE_NAMES[st.type_ix], "HighShelf");
+    }
+
+    #[test]
+    fn f64_rows_flow_through_the_scratch() {
+        let mut p = eq_active(48_000.0);
+        // Neutral chain: f32-representable doubles stay bit-exact through
+        // f64 -> f32 -> identity lanes -> f64 — the casts lose nothing on
+        // exactly representable values.
+        let mut ia = [0.25f64; 64];
+        let mut ib = [-0.125f64; 64];
+        let mut oa = [-7.0f64; 64];
+        let mut ob = [-7.0f64; 64];
+        {
+            let mut inp: [*mut f64; 2] = [ia.as_mut_ptr(), ib.as_mut_ptr()];
+            let mut outp: [*mut f64; 2] = [oa.as_mut_ptr(), ob.as_mut_ptr()];
+            assert_eq!(
+                drive64(&mut p, &mut inp, &mut outp, 64, 48_000.0),
+                ProcessStatus::Continue
+            );
+        }
+        assert_eq!(&oa[..], &ia[..], "neutral 64-bit chain bit-exact on L");
+        assert_eq!(&ob[..], &ib[..], "...and on R");
+        // A live band at double width: same lane math, reached through the
+        // scratch. Same block-exact tone and threshold as the f32 test.
+        p.set_param_value(PARAM_BAND_BASE, 1.0); // LowPass
+        p.set_param_value(PARAM_BAND_BASE + 1, 1_000.0);
+        p.set_param_value(PARAM_BAND_BASE + 3, 0.707);
+        let mut hot = sine64(5_250.0, 48_000.0, 64, 0);
+        let mut z = [0.0f64; 64];
+        let mut zout = [0.0f64; 64];
+        let mut out = [0.0f64; 64];
+        for _ in 0..64 {
+            let mut inp: [*mut f64; 2] = [hot.as_mut_ptr(), z.as_mut_ptr()];
+            let mut outp: [*mut f64; 2] = [out.as_mut_ptr(), zout.as_mut_ptr()];
+            drive64(&mut p, &mut inp, &mut outp, 64, 48_000.0);
+        }
+        let att = 20.0 * (rms64(&out) / rms64(&hot)).log10();
+        assert!(
+            att <= -20.0,
+            "64-bit LP@1k on a 5250 Hz tone: measured {att} dB"
+        );
+        // Bypass freezes at 64-bit too: the host's bytes, untouched.
+        p.set_param_value(0, 1.0);
+        let mut t = sine64(5_250.0, 48_000.0, 64, 64);
+        let mut bo = [1.0f64; 64];
+        let mut bz = [1.0f64; 64];
+        {
+            let mut inp: [*mut f64; 2] = [t.as_mut_ptr(), z.as_mut_ptr()];
+            let mut outp: [*mut f64; 2] = [bo.as_mut_ptr(), bz.as_mut_ptr()];
+            assert_eq!(
+                drive64(&mut p, &mut inp, &mut outp, 64, 48_000.0),
+                ProcessStatus::Continue
+            );
+        }
+        assert_eq!(&bo[..], &t[..], "bypass at 64-bit: host bytes, untouched");
+        // Mono in at double width: the right row is silence, never leftovers.
+        let mut p2 = eq_active(48_000.0);
+        let mut m = [0.25f64; 64];
+        let mut mo0 = [0.0f64; 64];
+        let mut mo1 = [9.0f64; 64];
+        {
+            let mut inp: [*mut f64; 1] = [m.as_mut_ptr()];
+            let mut outp: [*mut f64; 2] = [mo0.as_mut_ptr(), mo1.as_mut_ptr()];
+            drive64(&mut p2, &mut inp, &mut outp, 64, 48_000.0);
+        }
+        assert_eq!(&mo0[..], &m[..]);
+        assert!(
+            mo1.iter().all(|v| *v == 0.0),
+            "mono in, right out silence at either width — no invented audio"
+        );
+    }
+
+    #[test]
+    fn neutral_and_bypass_at_64_bit_never_touch_the_scratch() {
+        // Ratified invariant (task-11): values f32 cannot represent must
+        // ride the neutral and the bypassed 64-bit paths byte-for-byte. If
+        // either branch ever detoured through the f32 scratch, THIS is the
+        // test that fails — the 0.25-shaped test above cannot catch the
+        // detour by construction.
+        let hostile: Vec<f64> = (0..64)
+            .map(|i| match i % 4 {
+                0 => 1.0 / 3.0,
+                1 => core::f64::consts::SQRT_2,
+                2 => f64::from_bits(1), // smallest subnormal
+                _ => -1e-300,
+            })
+            .collect();
+        let rounded: Vec<f64> = hostile.iter().map(|&v| v as f32 as f64).collect();
+        assert_ne!(
+            hostile, rounded,
+            "the fixture really is unrepresentable in f32"
+        );
+
+        let bytes = |v: &[f64]| v.iter().map(|x| x.to_ne_bytes()).collect::<Vec<_>>();
+        let mut p = eq_active(48_000.0);
+        assert!(
+            p.neutral_fast,
+            "a fresh neutral instance carries the fast flag"
+        );
+        let mut in0 = hostile.clone();
+        let mut in1 = hostile.clone();
+        let mut o0 = vec![0.0f64; 64];
+        let mut o1 = vec![0.0f64; 64];
+        {
+            let mut ip: [*mut f64; 2] = [in0.as_mut_ptr(), in1.as_mut_ptr()];
+            let mut op: [*mut f64; 2] = [o0.as_mut_ptr(), o1.as_mut_ptr()];
+            assert_eq!(
+                drive64(&mut p, &mut ip, &mut op, 64, 48_000.0),
+                ProcessStatus::Continue
+            );
+        }
+        assert_eq!(
+            bytes(&o0),
+            bytes(&hostile),
+            "neutral f64: byte-exact, scratch NOT on the way"
+        );
+        assert_eq!(bytes(&o1), bytes(&hostile));
+
+        // Bypass after an engaged stretch: the same bytes while bypassed.
+        p.set_param_value(PARAM_BAND_BASE, 1.0); // LowPass engages
+        p.set_param_value(PARAM_BAND_BASE + 1, 1_000.0);
+        assert!(!p.neutral_fast, "engaging clears the flag before any copy");
+        p.set_param_value(0, 1.0); // bypass
+        {
+            let mut ip: [*mut f64; 2] = [in0.as_mut_ptr(), in1.as_mut_ptr()];
+            let mut op: [*mut f64; 2] = [o0.as_mut_ptr(), o1.as_mut_ptr()];
+            drive64(&mut p, &mut ip, &mut op, 64, 48_000.0);
+        }
+        assert_eq!(bytes(&o0), bytes(&hostile), "bypassed f64: same invariant");
+
+        // Honest hot path when un-bypassed: a hostile-scaled tone — the
+        // scratch detour does round its samples (the declared cost of f64),
+        // but the filter must BITE >= 20 dB: proof the copy branch above is
+        // not the filter pretending to pass.
+        p.set_param_value(0, 0.0);
+        let mut tone: Vec<f64> = sine64(5_250.0, 48_000.0, 64, 0)
+            .iter()
+            .map(|v| v / 3.0)
+            .collect();
+        let mut tout = vec![0.0f64; 64];
+        let mut z = vec![0.0f64; 64];
+        let mut zout = vec![0.0f64; 64];
+        for _ in 0..64 {
+            let mut ip: [*mut f64; 2] = [tone.as_mut_ptr(), z.as_mut_ptr()];
+            let mut op: [*mut f64; 2] = [tout.as_mut_ptr(), zout.as_mut_ptr()];
+            drive64(&mut p, &mut ip, &mut op, 64, 48_000.0);
+        }
+        let att = 20.0 * (rms64(&tout) / rms64(&tone)).log10();
+        assert!(
+            att <= -20.0,
+            "hot f64 LP@1k on a hostile-scaled 5250 Hz tone: {att} dB"
+        );
+    }
+
+    #[test]
+    fn mixed_or_broken_buffer_widths_are_refused() {
+        let mut p = eq_active(48_000.0);
+        // f64 in, f32 out: a mixed-width pair is a spec violation. Refuse
+        // BEFORE touching either array.
+        let mut ia = [0.25f64; 64];
+        let mut oa = [3.0f32; 64];
+        let mut i64p: [*mut f64; 1] = [ia.as_mut_ptr()];
+        let mut o32p: [*mut f32; 1] = [oa.as_mut_ptr()];
+        let in_buf = clap_audio_buffer {
+            data32: core::ptr::null_mut(),
+            data64: i64p.as_mut_ptr(),
+            channel_count: 1,
+            latency: 0,
+            constant_mask: 0,
+        };
+        let mut out_buf = clap_audio_buffer {
+            data32: o32p.as_mut_ptr(),
+            data64: core::ptr::null_mut(),
+            channel_count: 1,
+            latency: 0,
+            constant_mask: 0,
+        };
+        let proc = clap_process {
+            steady_time: 0,
+            frames_count: 64,
+            transport: core::ptr::null(),
+            audio_inputs: &raw const in_buf,
+            audio_outputs: &raw mut out_buf,
+            audio_inputs_count: 1,
+            audio_outputs_count: 1,
+            in_events: core::ptr::null(),
+            out_events: core::ptr::null(),
+        };
+        // SAFETY: our own well-formed buffers, alive for the whole call —
+        // the test plays the (malformed) host honestly.
+        let mut view = unsafe { ProcessView::from_sys(&proc, 48_000.0) };
+        assert_eq!(p.process(&mut view), ProcessStatus::Error);
+        assert_eq!(&oa[..], &[3.0f32; 64][..], "a refused block writes nothing");
+        // XOR violated (both row arrays non-null): same refusal.
+        let mut dummy32: [*mut f32; 1] = [oa.as_mut_ptr()];
+        let in_buf2 = clap_audio_buffer {
+            data32: dummy32.as_mut_ptr(),
+            data64: i64p.as_mut_ptr(),
+            channel_count: 1,
+            latency: 0,
+            constant_mask: 0,
+        };
+        let proc2 = clap_process {
+            audio_inputs: &raw const in_buf2,
+            ..proc
+        };
+        // SAFETY: same live buffers.
+        let mut view2 = unsafe { ProcessView::from_sys(&proc2, 48_000.0) };
+        assert_eq!(p.process(&mut view2), ProcessStatus::Error);
     }
 }
