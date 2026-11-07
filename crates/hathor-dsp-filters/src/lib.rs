@@ -33,6 +33,10 @@
 
 pub mod biquad;
 pub mod coeffs;
+pub mod crossover;
+pub mod phase_rotator;
 
 pub use biquad::{Biquad, BiquadNode};
 pub use coeffs::{Coeffs, FilterError, FilterKind};
+pub use crossover::{Band, CrossoverFamily, CrossoverPair, CrossoverSection, Q_LR2};
+pub use phase_rotator::PhaseRotator;
