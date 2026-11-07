@@ -50,12 +50,26 @@
 //! 100/500/4k/24k. `process` stays transcendental-free: the dB conversion the display
 //! wants is `render_db`, a display-thread call, not a callback one.
 //!
+//! ## 5. The masking meter reads the bank twice (M2)
+//!
+//! [`MaskingMeter`] takes two level spectra off that shared axis (signal A and B)
+//! and computes what a first-class hearing approximation says is *buried*: masked
+//! thresholds with asymmetric exponential skirts and power-add, five read-only dB
+//! views including the SPAN-style A↔B difference. The model is chosen and
+//! documented in `mask.rs` — an approximation, not a psychoacoustic standard; its
+//! acceptance is agreement with listening in M3. The math layer is fully testable
+//! today: it is pinned against an independent f64 re-derivation of its own doc
+//! formula, and its hot loop keeps the bank's law (setup allocates the skirt
+//! tables, `update` is pure indexed add/mul).
+//!
 //! ## What is NOT here (deliberately)
 //!
 //! No inverse real-FFT (M4 writes it with its first consumer — unconsumed code is
 //! untested code), no radix-4/split-radix (deferred to after the M0 benchmark), no
 //! SIMD (the probe measures the bank's real cost first), no `Node` wrapper (the M1
-//! plugin wiring owns that; the bank's `process` is built to slot into it).
+//! plugin wiring owns that; the bank's `process` is built to slot into it), and no
+//! psychoacoustic standard in the meter (the M2 model is an approximation on
+//! purpose; M3's listening pass decides).
 
 #![warn(missing_docs)]
 // The "no unwrap" bans apply to production code, not to tests: in a test an
@@ -64,6 +78,7 @@
 
 pub mod bank;
 pub mod complex;
+pub mod mask;
 pub mod plan;
 pub mod real;
 
@@ -74,5 +89,6 @@ pub use bank::{
     BankParams, FftBank, TierTuning, AXIS_F_HI, AXIS_F_LO, DEFAULT_BINS, TIER_BANDS_HZ, TIER_SIZES,
 };
 pub use complex::Complex;
+pub use mask::{MaskingMeter, MaskingParams};
 pub use plan::{bin_freq, freq_bin, FftPlan};
 pub use real::RealFftPlan;

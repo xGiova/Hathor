@@ -1,7 +1,8 @@
-//! The realtime-contract proof for the FFT kernels and the M1 bank (spec
-//! invariant 1): `FftPlan::new`/`RealFftPlan::new`/`FftBank::new` are the only
-//! allocators, `process`/`inverse`/`RealFftPlan::process`/`FftBank::process` never
-//! allocate.
+//! The realtime-contract proof for the FFT kernels, the M1 bank and the M2 masking
+//! meter (spec invariant 1): `FftPlan::new`/`RealFftPlan::new`/`FftBank::new`/
+//! `MaskingMeter::new` are the only allocators, `process`/`inverse`/
+//! `RealFftPlan::process`/`FftBank::process`/`MaskingMeter::update`/
+//! `MaskingMeter::render_db` never allocate.
 //!
 //! Method, per CONVENTION §2.5 and the core guard: the test binary installs
 //! [`CheckedAllocator`], each run-phase test enters an [`AudioSection`] and asserts
@@ -236,5 +237,69 @@ fn bank_construction_allocations_are_visible_to_the_guard() {
     assert!(
         n >= 20,
         "FftBank::new must show its tables in the counter, got {n}"
+    );
+}
+
+/// The M2 invariant for the masking meter: `MaskingMeter::new` is the only
+/// allocation site; `update` (the skirt convolution over the shared axis) and
+/// `render_db` (the dB pass) never allocate. Dense spectra so the hot loop runs
+/// its full skirt work on every bin — an all-zero input would let the optimizer
+/// skip everything the section was entered to guard.
+#[test]
+fn masking_meter_update_and_render_do_not_allocate_inside_an_audio_section() {
+    let _lock = serial();
+    reset_counters();
+    let mut meter = hathor_dsp_fft::MaskingMeter::new(&hathor_dsp_fft::MaskingParams::new());
+    // Deterministic dense pattern (setup-side): no zeros, every skirt tap fires.
+    let a: Vec<f32> = (0..meter.bins())
+        .map(|k| ((k % 97) as f32 + 1.0) * 1e-3)
+        .collect();
+    let b: Vec<f32> = (0..meter.bins())
+        .map(|k| ((k % 53) as f32 + 1.0) * 8e-4)
+        .collect();
+
+    let section = AudioSection::enter().expect("enter AudioSection");
+    meter.update(black_box(&a), black_box(&b));
+    meter.render_db();
+    // Read the views (no allocate) so the guarded work must have happened.
+    let mask_peak = meter
+        .mask_a()
+        .iter()
+        .fold(f32::NEG_INFINITY, |acc, &v| acc.max(black_box(v)));
+    let diff_abs: f32 = meter
+        .difference()
+        .iter()
+        .fold(0.0f32, |acc, &v| acc.max(black_box(v.abs())));
+    let allocs = section.allocs_here();
+    drop(section);
+
+    assert_eq!(allocs, 0, "meter update/render allocated {allocs} times");
+    assert!(
+        mask_peak > -100.0 && diff_abs > 0.0,
+        "the guarded work must be real: mask peak {mask_peak}, diff {diff_abs}"
+    );
+}
+
+/// Positive control (measure mode): meter construction allocates visibly — two
+/// skirt tables plus twelve axis-sized buffers must show up in the counter, or
+/// the zero-claim above is vacuous for this type.
+#[test]
+fn masking_meter_construction_allocations_are_visible_to_the_guard() {
+    let _lock = serial();
+    set_panic_on_audio_alloc(false);
+    reset_counters();
+    let n = {
+        let section = AudioSection::enter().expect("enter AudioSection");
+        let meter = black_box(hathor_dsp_fft::MaskingMeter::new(&black_box(
+            hathor_dsp_fft::MaskingParams::new(),
+        )));
+        let counted = section.allocs_here();
+        drop(meter);
+        counted
+    };
+    set_panic_on_audio_alloc(true);
+    assert!(
+        n >= 10,
+        "MaskingMeter::new must show its tables in the counter, got {n}"
     );
 }

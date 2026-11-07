@@ -120,3 +120,52 @@ pub fn expected_tier_bin(
     }
     total
 }
+
+/// Parameters for [`mask_threshold_oracle`], mirroring the `mask.rs` module doc's
+/// formula so the oracle reads straight from the specification, not the code.
+pub struct MaskingOracleParams {
+    /// Skirt width upward (masker below a bin), in bins.
+    pub up: f32,
+    /// Skirt width downward (masker above a bin), in bins.
+    pub down: f32,
+    /// Masker gain.
+    pub weight: f32,
+    /// Absolute threshold as a linear power (`10^(floor_db/10)`).
+    pub at: f64,
+    /// Truncation radius `D` from the doc formula, recomputed independently.
+    pub d_max: usize,
+}
+
+/// The masked threshold `T(k)` of the `mask.rs` doc, summed **per target bin and
+/// per distance** in f64 with a fresh `exp()` on every term — deliberately the
+/// opposite iteration order and a different code path from the meter's
+/// table-driven [`accumulate`](crate::mask::accumulate) (which iterates maskers
+/// and reads precomputed weights). House law: the oracle never reuses the
+/// implementation-under-test's helper, so a shared bug can't hide in a shared
+/// table. Out-of-axis distances are skipped, `d = 0` never contributes (no
+/// self-masking), and a zero width disables that skirt side.
+pub fn mask_threshold_oracle(x: &[f32], o: &MaskingOracleParams) -> Vec<f64> {
+    let n = x.len();
+    let mut t = vec![0.0f64; n];
+    for (k, tk) in t.iter_mut().enumerate() {
+        let mut acc = o.at;
+        for d in 1..=o.d_max {
+            // Masker d bins *below* k: upward skirt W↑(d) = weight·exp(−d/up).
+            if o.up > 0.0 && d <= k {
+                let m = x[k - d] as f64;
+                if m > 0.0 {
+                    acc += m * (o.weight as f64) * (-(d as f64) / o.up as f64).exp();
+                }
+            }
+            // Masker d bins *above* k: downward skirt W↓(d) = weight·exp(−d/down).
+            if o.down > 0.0 && k + d < n {
+                let m = x[k + d] as f64;
+                if m > 0.0 {
+                    acc += m * (o.weight as f64) * (-(d as f64) / o.down as f64).exp();
+                }
+            }
+        }
+        *tk = acc;
+    }
+    t
+}
