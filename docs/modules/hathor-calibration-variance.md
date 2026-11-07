@@ -163,6 +163,13 @@ a `hathor-dsp-measure` planned API (already folded into
   τ = 300 ms semantics per its doc), ~2 FMA per frame per channel at block rate
   (**expected** — structural count, not a measurement), zero allocation, publishes to the UI
   through the usual atomics (architecture §2), never a second buffer.
+* **Convention to be DECIDED with M6 — peak vs RMS for the reference sine.** A "0 dBFS sine"
+  has two truths: its **peak** reads 0 dBFS, its **RMS** — what the sweet-spot meter shows —
+  reads **3.01 dB lower**, two orders of magnitude above this contract's ±0.1 dB strip
+  tolerance (the number is from the RMS path's test note). The peak-vs-RMS convention of the
+  reference tone must be stated explicitly when M6 wires the strip; until it is decided, the
+  −20…−14 window above refers to the meter's own truth (RMS dBFS of the calibrated stream),
+  never silently to peak.
 
 ### 4. Post-NAM / post-drive auto-makeup gain
 

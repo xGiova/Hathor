@@ -35,12 +35,13 @@ are not twins (the softening itself: owner decision, 2026-11-05, after the probe
 | Module | Status | Document |
 |---|---|---|
 | `hathor-dsp-core` | written, tested | [modules/hathor-dsp-core.md](modules/hathor-dsp-core.md) |
-| `hathor-dsp-filters` | written, tested | [modules/hathor-dsp-filters.md](modules/hathor-dsp-filters.md) |
-| `hathor-dsp-fft` | written, tested (kernels + M1 bank: 36 lib + 7 contract, 2 bench ignored) | [modules/hathor-dsp-fft.md](modules/hathor-dsp-fft.md) |
-| `hathor-dsp-measure` | written, tested | [modules/hathor-dsp-measure.md](modules/hathor-dsp-measure.md) |
+| `hathor-dsp-filters` | written, tested 44 (M0 kernels + M2 crossover & phase rotator: 40 lib + 4 contract) | [modules/hathor-dsp-filters.md](modules/hathor-dsp-filters.md) |
+| `hathor-dsp-fft` | written, tested (kernels + M1 bank + M2 masking meter: 50 lib + 9 contract, 3 bench ignored) | [modules/hathor-dsp-fft.md](modules/hathor-dsp-fft.md) |
+| `hathor-dsp-measure` | written, tested 75 (M0 + M2 phase vector + M6 tracker; the masking meter ships in `hathor-dsp-fft`) | [modules/hathor-dsp-measure.md](modules/hathor-dsp-measure.md) |
 | `hathor-host-graph` | written, tested (M0 Chain) | [modules/hathor-host-graph.md](modules/hathor-host-graph.md) |
 | `hathor-clap` | written, tested 28 (25 unit + 2 integration + 1 doctest; real-host load = owner step) | [modules/hathor-clap.md](modules/hathor-clap.md) |
 | `hathor-analyzer` | written, tested 17 (8 unit + 3 lifecycle + 6 spectrum proofs; cost bench ignored; host load = owner step) | [modules/hathor-analyzer.md](modules/hathor-analyzer.md) |
+| `hathor-eq` | written, tested 15 (12 unit + 3 lifecycle; cost bench ignored; M2 cost gate MET — measured; host load = owner step) | [modules/hathor-eq.md](modules/hathor-eq.md) |
 | gain staging & channel variance (M6 contract, policy not crate) | spec | [modules/hathor-calibration-variance.md](modules/hathor-calibration-variance.md) |
 | `hathor-nam` (accepted draft, crate not yet created; gated G5) | draft spec (M6.5) | [modules/hathor-nam.md](modules/hathor-nam.md) |
 | `hathor-audio-probe` | written, tested | [modules/hathor-audio-probe.md](modules/hathor-audio-probe.md) |

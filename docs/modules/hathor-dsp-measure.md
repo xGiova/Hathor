@@ -1,11 +1,14 @@
 # Module: `hathor-dsp-measure`
 
-> Status: **written, tested 54** (M0 primitives landed; M3: masking meter; M6: level tracking for
-> the gain-staging calibration contract). Dependencies: `hathor-dsp-core` — the whole product
-> coupling. `hathor-dsp-filters` exports `coeffs::db_to_lin` with a **design-oriented clamp**;
-> this crate deliberately carries its own **public meter pair** (`db::lin_to_db`/`db::db_to_lin`,
-> silence → `f32::NEG_INFINITY`): TD-22, two contracts on purpose. `hathor-dsp-fft` will arrive
-> as a dev-dependency for the M3 fast cross-correlation, nothing sooner.
+> Status: **written, tested 75** — M0 primitives, **M2 phase vector** (landed 2026-11-07)
+> and M6 level tracking; the masking meter itself landed **in `hathor-dsp-fft`** (`mask.rs`,
+> layered on the bank — §M3 below keeps the contract and points there). Dependencies:
+> `hathor-dsp-core`, and **`hathor-dsp-fft` is now a product dependency**: the phase vector
+> delegates to the frozen `RealFftPlan` kernel — it arrived with its first consumer, not
+> sooner, as this header always promised. `hathor-dsp-filters` exports `coeffs::db_to_lin`
+> with a **design-oriented clamp**; this crate deliberately carries its own **public meter
+> pair** (`db::lin_to_db`/`db::db_to_lin`, silence → `f32::NEG_INFINITY`): TD-22, two
+> contracts on purpose.
 
 ## Purpose
 
@@ -46,7 +49,55 @@ pub fn null_residue_db(a: &[f32], b: &[f32], gain_db: f32, invert: bool) -> f32;
   with `hathor-dsp-filters` (band 40-120 Hz) before the null — a **consumer-side composition**
   (the kick↔bass plugin owns the filters dependency; this crate does not).
 
+### M2 — the phase vector (live API, landed 2026-11-07, `phase_vector.rs`)
+
+The kick↔bass tooling's currency — per-bin phase and **group delay in samples** — was a
+sketch until today; the live shape, with its two-rate split:
+
+```rust
+let mut pv = PhaseVector::new(n);           // setup: buffers sized once, declared maximum
+pv.analyze(&frame)?;                        // hot-kernel rate: delegates to the frozen
+                                            // `RealFftPlan` — zero allocation, ZERO
+                                            // transcendentals
+pv.extract_phases();                        // UI-rate by contract: where atan2 lives honestly
+// pv.phases()/unwrapped()/group_delay()   // group delay −dφ/dω in samples
+```
+
+* **The split is the doctrine, not an optimization detail**: `analyze` is the only
+  callback-shaped part; `extract_phases` runs the `atan2`s at UI rate — the same
+  `process`/`render_db` division the fft crate makes, restated here so a measurement never
+  smuggles transcendentals into a deadline.
+* **Correctness is pinned against closed form**: a pure delay `D` feeds the bins
+  `φ_k = −2πkD/N`, and `group_delay()` measures **exactly D on every interior bin**
+  (forward differences `(φ_{k+1}−φ_k)·(−N/2π)`, backward at the last interior). Edges are
+  **documented exclusion, not silent garbage**: DC and Nyquist are purely real by the
+  unpacking's construction (the fft's `real.rs` header makes that zero-imaginary crux the
+  reason they carry **no phase to differentiate**) — `group_delay()` reports `NAN` at bins
+  `0` and `N/2`, with the closed-form argument in the header.
+* **The unwrap convention, in words before code**: `atan2` answers in [−π, +π]; unwrapping
+  walks the **bins** (frequency axis — what `dφ/dω` needs) and adds the multiple of 2π that
+  keeps each step in `(−π, π]`, the exact `+π` boundary counted as `+π` — a **total**
+  convention, and the impulse-ramp test reproduces it bit for bit. This is *not* time-axis
+  unwrapping of successive frames (a phase-vocoder concern with no consumer; not guessed
+  here).
+* **`phase::block_null_residue_db(a, b, gain_db, invert) -> f32`** — the M3 acceptance shape
+  (kick↔bass "null residue < −30 dB") as a whole-block, multi-channel test: it returns the
+  **WORST channel's** residue, never a mean. The reason is acceptance-honesty: a 1% leak
+  hiding in R must not disappear behind L's perfect −∞ — the test
+  `block_null_reports_the_worst_channel_not_an_average` pins exactly that (`−40.000 dB`,
+  `20·log10 0.01`). No surviving channels / matched silence
+  → `NEG_INFINITY` (honest silence, invariant 2); a `NaN` sample propagates — a broken
+  signal never decays into a reassuring number.
+
 ### M3 — the masking meter
+
+> **Landing note (2026-11-07):** the meter shipped as `mask.rs` in `hathor-dsp-fft` — layered
+> on the bank's shared log axis, never owning a bank; its model (asymmetric exponential
+> skirts, power-add, flat AT from the floor, five views) and its declared status — a
+> first-class approximation, **not** a psychoacoustic standard, acceptance = agreement with
+> listening in M3 — are documented in [hathor-dsp-fft.md](hathor-dsp-fft.md) §M2. The sketch
+> below is the contract's first draft, preserved as history; what survives unchanged are the
+> questions and the double-buffered UI shape.
 
 The "where they step on each other" between kick and bass:
 
@@ -108,6 +159,21 @@ impl RmsTracker {
   The band lives in the channel-strip contract (that doc §3); this crate only supplies honest
   dBFS, invariant 2 keeps that reference ±1.0 and silence = `f32::NEG_INFINITY` —
   `silence_keeps_silence` guards the muted-track case against ever "warming up".
+* **The sweet-spot metering primitive, pinned to its contract** (2026-11-07):
+  `RmsTracker::sweet_spot()` is exactly `new(SWEET_SPOT_TAU_S)` with
+  `pub const SWEET_SPOT_TAU_S: f32 = 0.300` — the **300 ms window lifted verbatim from
+  [hathor-calibration-variance.md](hathor-calibration-variance.md) §3**, so the guide the eye
+  reads and the contract the strip promises share one number by constant, not by comment
+  (`sweet_spot_carries_the_300ms_window_contract` asserts `tau == 0.300`). Publishing is
+  lock-free: `publish_to(&AtomicParam)` moves the value through atomics (architecture §2),
+  never a mutex — fresh/poisoned/level states all pinned by tests.
+
+> **House lesson, from this crate's gate tests:** an assertion that *fails inside*
+> `AudioSection` is a **double panic** — the guard's own panic escapes `catch_unwind` on the
+> release `nounwind` Box path and the abort **swallows the message**: the test dies with no
+> verdict (proved in `crates/hathor-dsp-core/examples/guard_probe.rs`, re-proved in
+> `measure/src/lib.rs`). The recipe is now law: **values measured inside the section are
+> captured and asserted OUTSIDE it.** The gate is a scope; the verdict comes after.
 
 ## Invariants
 

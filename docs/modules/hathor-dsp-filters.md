@@ -1,6 +1,8 @@
 # Module: `hathor-dsp-filters`
 
-> Status: **written and tested** (M0, 27/27 green debug+release). Dependencies: `hathor-dsp-core`.
+> Status: **written and tested 44** — 40 lib + 4 allocation-contract, green debug+release.
+> M0 kernels landed; **M2 landed 2026-11-07: the crossover families and the phase rotator**
+> (sections below). Dependencies: `hathor-dsp-core`.
 
 ## Purpose
 
@@ -106,6 +108,61 @@ load/store**: see [../it/rust.md](../it/rust.md) §8. The `unsafe_op_in_unsafe_f
 pedantry: forcing every unsafe to be encapsulated with a SAFETY comment means forcing a
 line-by-line reread — and it was in that reread that the `−a2·out` bug surfaced.
 
+### `crossover.rs` — Butterworth & Linkwitz-Riley (M2, landed)
+
+Minimum-phase crossover sections built on the RBJ/DF2T machinery: **`Bw2`** — one RBJ biquad
+at `Q = 1/√2` per half, the classic Butterworth alignment, −3 dB at the corner on each
+branch; **`Lr2`** — the squared 1st-order Butterworth (`1/(s+1)²`, critically damped
+`Q = 0.5`), one section per half; **`Lr4`** — the `Bw2` section cascaded with *itself*, two
+identical biquads per half: each branch −6 dB at the corner, both turned −180°, which is
+*why* the pair sums to flat magnitude — and it is **measured**, not asserted from theory:
+worst `| |LP+HP| − 1 | = 3.422e-8` on the test grid against a 2e-3 tolerance chosen up front
+(~580× margin). Coefficients are pinned to the published closed forms within **1e-6 absolute
+per coefficient** (the documented f64-design→f32 narrowing floor is ~1.2e-7 per unit).
+
+> **The parity law — measured, not assumed, and the note M3 will live with.** `Bw2` and `Lr2`
+> halves arrive at the corner in **opposite phase** (LP ∓90°, HP ±90°), so their analytical
+> sum **nulls at `fc`**: measured depths −286/−287 dB at the exact grid point — *with the
+> grid caveat the test prints*: that number is the sampling's property (both branches land on
+> a near-perfect cancellation right there), stepping 0.05% off `fc` reads −63/−66 dB, and the
+> notch at −6 dB is 1.144/1.579 octaves wide (BW2/LR2). Claiming "flat sum" for these families
+> would be the famous crossover-interaction myth; only the **squared (LR4) family is
+> complementary**. Whoever wires a `Bw2`/`Lr2` crossover into a chain **inverts one branch** —
+> that is the audible consequence of the law, not a footnote. And `Lr2` ships `Q = 0.5` *per
+> half*: the SPL-matching quad is the classical pair; the flat-sum property is LR4's.
+
+Real-time contract identical to `BiquadNode`: setup allocates `channels × sections` lanes;
+`process()` never allocates — a corner change designs **one** new `Coeffs` (at most once per
+block) and moves every lane with `ramp_to`. Latency declared `0`: these are minimum-phase
+filters; their fractional group delay is a *measurement*, not a PDC figure.
+**`CrossoverPair` is NOT a composite `Node`:** the two branches live in different chains —
+a multiband routes them to different destinations, and a fused node could not be split
+afterwards. (Test: `bw2_lr2_notch_widths_and_lr4_phase_slope_are_measured` prints the LR4
+sum's octave phase span and local slope at `fc` — the numbers behind the −180° claim.)
+
+### `phase_rotator.rs` — the allpass cascade (M2, landed)
+
+A cascade of **1..=4** identical 2nd-order allpass sections (`MAX_SECTIONS = 4` — two
+sections already deliver ~720°) whose corner `fc` glides through a fixed band as a
+normalized `rotation` sweeps `0..=1`. Why allpass: the numerator is the denominator
+**reversed** (`b0 = a2/a0`, `b1 = a1/a0`, `b2 = 1`) — the paraconjugate identity makes
+`|H(e^{jω})| = 1` at every frequency *by construction*: the section rotates phase and touches
+magnitude by exactly zero, because any magnitude ripple the alignment tool introduced would
+be audible as a tonal change, while phase is what it exists to fix.
+
+Measured, not asserted (`rotation_phase_is_continuous_and_covers_the_band`): the unwrapped
+span across the sweep is **+642.4°** for the shipped band/sections (comfortably over the one
+full turn per section the theory promises), the phase at `fc = f` is **−360° per section**
+(read **360.0°** for one section, asserted within ±8°), and no backward step breaks
+continuity; the runtime recursion matches the algebraic `Coeffs::response` to **0.000°**.
+Sign note, documented in the header: `atan2` reports the turn through the ±180° branch, so a
+measurement may unwrap the same physical rotation as *ascending* 0→+360° — **magnitude of the
+turn is invariant, direction is convention.** Coefficients recompute **at most once per
+block** (the `dirty` edge — the transcendentals `sin/cos/powf` are paid there, bounded,
+allocation-free); `process()` reuses lanes and moves them with `ramp_to`, the same
+zipper-free doctrine as `BiquadNode`. Latency declared `0`: a minimum-phase allpass has
+fractional *group delay*, not integer latency — conflating them is what breaks PDC alignment.
+
 ## Invariants
 
 1. `design` never returns unstable or `NaN` coefficients (test over a freq×Q×samplerate
@@ -121,6 +178,12 @@ line-by-line reread — and it was in that reread that the `−a2·out` bug surf
    identity is testing the wrong thing.
 5. `latency_samples() == 0` for every minimum-phase IIR. The group delay (fractional,
    f-dependent) is another quantity and lives in `hathor-dsp-measure`.
+6. **The crossover parity is a measured law, not an assumption**: LR4 sums flat (worst
+   3.422e-8 on the grid, 580× inside tolerance); `Bw2`/`Lr2` **null at `fc`** — chains
+   wiring them invert one branch, and the null's printed depth carries its grid caveat.
+7. The rotator's magnitude is exactly 1 at every frequency **by construction** (the
+   paraconjugate numerator) — a magnitude-changing rotator is a different, wrong module;
+   the allpass identity test pins response against the algebraic path to 0.000°.
 
 ## Rust concepts embodied
 
@@ -136,8 +199,9 @@ min-phase vs group delay · phase as a first-class quantity (`response`).
 
 ## Deferred (and why)
 
-* **Linkwitz-Riley crossover / 4-pole Butterworth** → M2: the multiband and the phase rotator
-  need them; they are biquad cascades, so this module is the prerequisite, not the place.
+* ~~**Linkwitz-Riley crossover / 4-pole Butterworth** → M2~~ — **landed 2026-11-07**
+  (`crossover.rs`, with the phase rotator): they are biquad cascades, exactly as this item
+  predicted — the M0 module was the prerequisite, and it turned out to be enough.
 * **SVF (state-variable) and ladder** → M2/M8: the SVF is the right form for cutoff modulated
   at sample rate (synth); here the cutoff changes at block rate, and DF2T is enough.
 * **Linear-phase FIR** → M2 (EQ with a linear-phase option): it is a different module

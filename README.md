@@ -28,17 +28,24 @@ share — which is why the lower layers expose it honestly.
 | Module | Scope | Milestone | State | Tests |
 |---|---|---|---|---|
 | `crates/hathor-dsp-core` | realtime contract, buffers, node ABI, params, allocation guard | M0 | **implemented** | 20/20 (debug+release) |
-| `crates/hathor-dsp-filters` | RBJ biquads: f64 design, DF2T runtime, AVX2 kernel | M0–M1 | **implemented** | 27/27 (debug+release) |
-| `crates/hathor-dsp-fft` | complex/real FFT, STFT front-end | M0–M1 | **implemented** (kernels + multi-rate bank: whole bank = 0.94% of one core, measured release) | 43/43 +2 bench (debug+release) |
-| `crates/hathor-dsp-measure` | level/correlation/time-alignment, masking meter | M0–M1 | **implemented** (M0 API; masking → M1) | 54/54 (debug+release) |
+| `crates/hathor-dsp-filters` | RBJ biquads: f64 design, DF2T runtime, AVX2 kernel; M2: BW/LR crossovers (measured parity law) & allpass phase rotator | M0–M2 | **implemented** | 44/44 (debug+release) |
+| `crates/hathor-dsp-fft` | complex/real FFT, multi-rate bank, masking meter (M2, `mask.rs`) | M0–M2 | **implemented** (bank = 0.94% of one core, measured release; meter 200.2–204.0 µs per update+render at display rate, measured quiet machine 2026-11-07) | 59/59 +3 bench (debug+release) |
+| `crates/hathor-dsp-measure` | level/correlation/time-alignment, per-bin phase & group delay (M2), RMS tracker (M6 primitive) | M0–M6 | **implemented** (masking meter ships in `hathor-dsp-fft`) | 75/75 (debug+release) |
 | `crates/hathor-host-graph` | node chain, scratch buffers, latency sum | M0–M5 | **implemented** (M0 Chain) | 12+1/12+1 (debug+release) |
-| `crates/hathor-clap` | safe plugin-side CLAP wrapper over clap-sys 0.5.0 (mock-host proxy green; real DAW load = owner step) | M1 | **implemented** | 27/27 +2 doctest-sketch ignored (debug+release) |
+| `crates/hathor-clap` | safe plugin-side CLAP wrapper over clap-sys 0.5.0 (mock-host proxy green; real DAW load = owner step) | M1 | **implemented** | 28/28 +2 doctest-sketch ignored (debug+release) |
 | `apps/hathor-audio-probe` | cpal/WASAPI harness, xrun proxy & cost bench | M0 | **implemented** (G1 closed: live 60 s WASAPI run, 0 allocs, worst chunk 0.042× budget) | 169/169 (debug+release) |
-| `plugins/hathor-analyzer` | SPAN-like analyzer v0, headless CLAP (GUI pending design; real-DAW load = owner step) | M1 | **built** (anchor: whole path 0.93% of one core, measured) | 15/15 (debug+release) |
-| `plugins/*` (rest) | EQ, Filter, Compressor, Reverb, Delay, Saturator, kick↔bass phase-alignment | M1–M4 | planned | — |
+| `plugins/hathor-analyzer` | SPAN-like analyzer v0, headless CLAP (GUI pending design; real-DAW load = owner step) | M1 | **built** (anchor: whole path 0.93% of one core, measured) | 17/17 (debug+release) |
+| `plugins/hathor-eq` | 8-band parametric EQ v0, headless CLAP (GUI pending design; real-DAW load = owner step, **NOT VERIFIED**) | M2 | **built** (M2 cost gate **MET**: 8 bands active 0.46–0.48% of one core @96 kHz, measured — lead's gate, quiet machine 2026-11-07; not yet a home anchor) | 15/15 (debug+release) |
+| `plugins/*` (rest) | Filter, Compressor, Reverb, Delay, Saturator, kick↔bass phase-alignment | M1–M4 | planned | — |
 | `crates/hathor-vst3-host` | C++ VST3 bridge (frozen ABI) | M5 | planned | — |
 | Channel-strip calibration & variance | `G_cal` gain-staging contract, seeded per-channel drift, sweet-spot meter | M6 | spec ([docs/modules/hathor-calibration-variance.md](docs/modules/hathor-calibration-variance.md)) | — |
 | `crates/hathor-nam` (accepted draft, not yet created) | `.nam` loader + causal NN inference node (NAM captures) | M6.5 (gate G5) | draft spec ([docs/modules/hathor-nam.md](docs/modules/hathor-nam.md)) | — |
+
+**Workspace total (2026-11-07, M2-gate batch): 440/440 green, debug and release** — the lead's
+gate on a quiet dev machine. The 5 cost benches (2 bank + 1 meter + 1 analyzer + 1 EQ) are
+`#[ignore]`d and run separately in release, alongside the 2 non-executed `ignore`d doctest
+sketches in hathor-clap; totals include the 2 executable doctests (hathor-host-graph,
+hathor-clap).
 
 <sub>* "Implemented" = green in debug **and** release, `clippy -D warnings` clean, realtime contract enforced (zero alloc/lock in `process`). Test counts are real `cargo test` results, refreshed at each milestone gate — not aspirations.</sub>
 

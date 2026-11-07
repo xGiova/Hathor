@@ -118,7 +118,14 @@ Its Safety contract is spelled out: every buffer row non-null and sized by `fram
 channel counts coherent with the arrays, everything alive and stable for `'a`. Inside a
 callback the wrapper discharges this from the vtable contract; outside one, the caller
 assumes the verification burden exactly like the host would — a mistyped `channel_count`
-there is UB downstream, not a panic.
+there is UB downstream, not a panic. **Caveat learned the hard way from the EQ tests
+(deviation #2):** `out_aliases_in` compares the channel pointers **pairwise** (`any` over
+`min(channel_count)`), not the `data32` arrays — hosts legitimately hand separate arrays
+pointing at the same buffers. A mock that shares rows only *half-way* was producing **silent
+zeros, not errors**: aliasing is a port-level promise, partial aliasing is topology nobody
+declared, and the analyzer's spectrum rows survived only because they happened to be
+disjoint. All-or-nothing is the honest shape for a mock, and the lifecycle mocks now respect
+it.
 
 ## Invariants
 

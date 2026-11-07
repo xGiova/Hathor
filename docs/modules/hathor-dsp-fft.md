@@ -1,7 +1,8 @@
 # Module: `hathor-dsp-fft`
 
-> Status: **written, tested 43** — 36 lib + 7 allocation-contract; kernels **and** the M1
-> multi-rate bank landed (the 2 cost benches are `#[ignore]`d, run only in the release gate).
+> Status: **written, tested 59** — 50 lib + 9 allocation-contract; kernels, the M1 multi-rate
+> bank, **and the M2 masking meter** landed (the 3 cost benches — 2 bank + 1 meter — are
+> `#[ignore]`d, run only in the release gate).
 > Dependencies:
 > **none in the product** — `hathor-dsp-core` is a **dev-dependency only** (the guard tests in
 > `tests/alloc_contract.rs` need `AudioSection`; nothing in the shipped kernels imports it), and
@@ -12,7 +13,8 @@
 The fast Fourier transform, **written by us**, for two non-negotiable reasons:
 
 1. The project is "rewrite the DSP from 0": the FFT is the heart of the analyzer (M1), the
-   masking meter and null test (M3), polyphase oversampling (M4), convolution reverb (M4).
+   masking meter (landed 2026-11-07, §M2 below) and null test (M3), polyphase oversampling
+   (M4), convolution reverb (M4).
    Using a library for *all* of that means never having written it.
 2. The actual usage (multi-rate bank, windows, hop, magnitude in dB) requires control over
    allocation and layout that general-purpose libraries do not give.
@@ -190,7 +192,7 @@ impl FftBank {
 
 1. The constructors — `FftPlan::new`, `RealFftPlan::new`, `FftBank::new` — are the only places
    that allocate. Nothing in any `process`/`inverse`/`levels`/`db`/`reset` does (the
-   `hathor-dsp-core` rule applies: the 7 `AudioSection` tests in `tests/alloc_contract.rs`
+   `hathor-dsp-core` rule applies: the 9 `AudioSection` tests in `tests/alloc_contract.rs`
    verify it, with two measure-mode controls proving the guard is not decoration).
 2. `n` is a power of 2, guaranteed by the constructor (`Result` or a documented panic — a
    panic in setup is acceptable: it is a programmer bug, not a user bug).
@@ -204,6 +206,9 @@ impl FftBank {
 6. One normalization law across all tiers: `(4/N)²` — a full-scale sine reads 1.0 (0 dBFS) at
    every tier; and the axis mapping starts at k = 1 — DC is not audio, and four tiers would
    quadruple-count it.
+7. The masking meter **never owns a bank** and **never masks a bin with itself** (`d ≥ 1`):
+   thresholds come from the *other* spectrum on the shared log axis, and a lone tone leaves
+   its own bin at the floor. Layering over the frozen M1 API is what keeps the meter additive.
 
 ## Rust concepts to put into practice
 
@@ -219,6 +224,59 @@ M1 SIMD (`#[cfg(target_arch)]` as in `lanes8`).
 bin. Plus: hermitian symmetry (why a real signal has half a spectrum), the packing trick (the
 symmetry *used* to halve the work), and the reason the "right" analyzer is multi-rate: the
 time-frequency constraint is not cheated, it is *architected*.
+
+## M2 — the masking meter (landed 2026-11-07, `mask.rs`)
+
+The A↔B question the analyzer's masking tool asks: not "what differs?" but **what of the
+difference is audible?** Two banks feed two level vectors — the meter never owns a bank,
+which is what keeps this layer additive over the frozen M1 API. The model, over the shared
+log axis and linear power in `(4/N)²` units:
+
+```text
+T(k)  = AT + Σ_{d=1..D} [ X(k−d)·W↑(d) + X(k+d)·W↓(d) ]     (out-of-axis terms skipped)
+AT    = 10^(floor_db/10)                                    — the bank's floor, flat
+W↑/W↓ = weight · exp(−d/spread_up|down_bins)                — asymmetric skirts
+hidden_A(k) = min(X_A(k), T_B(k))   and mirror;  difference = A−B dB (SPAN's ruler)
+```
+
+* **Declared in the module's own header: a first-class approximation, NOT a psychoacoustic
+  standard.** Not ISO 532, not a Moore-Glasgow auditory filter, not a fitted masking surface
+  — a deliberately small, testable math layer whose **acceptance is agreement with listening
+  in M3**. Until that pass happens, the defaults are *starting points, not claims*. What the
+  code does promise: the formula above **is** the contract, it is implemented exactly, and
+  the tests re-derive it independently in f64 (`testsupport::mask_threshold_oracle` — never
+  the same helper twice).
+* **The choices, each with a reason:** asymmetric skirts — masking reaches upward roughly
+  twice as far as downward, defaults `spread_up_bins = 15` / `spread_down_bins = 7` on the
+  bank's ≈100 bins/octave axis (15 bins ≈ −43 dB one octave up, falling faster down; a
+  coarse stand-in for critical-band width, stated as such). **Power-add** — maskers sum in
+  linear power (commutative; the source of the "power-add" label in the M2 contract).
+  **No self-masking** — `d ≥ 1` only, so a lone tone leaves its own bin at the floor
+  (`a_bin_never_masks_itself`). **Truncation** — the exponential tail drops where it falls
+  below 1e-5 of a masker's power; the residual past `D` is < 1.6e-4 relative in the widest
+  direction, far below the f32 accumulation noise of the sum itself, and `D` is a setup
+  decision exposed as `skirt_radius`.
+* **The AT caveat, written down so nobody "discovers" it in M3:** real hearing thresholds
+  curve up at both axis ends; a *flat* absolute threshold from the bank floor (−120 dBFS) is
+  honest for a **relative** A/B tool (the floor cancels in comparisons near it) and wrong
+  for absolute audibility at very low levels.
+* **Five views** — `mask_a`, `mask_b`, `hidden_a`, `hidden_b` (linear, written by `update`)
+  and `difference` (the dB A↔B ruler, floor-clamped). The `log10` the dB views need lives in
+  `render_db`, a **display-thread call** — invariant 5's law, inherited verbatim by the
+  meter. `update(a, b)` is pure indexed mul/add over skirt tables built once at setup (f64,
+  narrowed once): zero allocation under `AudioSection` STRICT, proven in
+  `tests/alloc_contract.rs` (the meter's two guard tests bring the contract file to
+  nine). Parameters are fixed at setup
+  (`MaskingParams`, same doctrine as `BankParams`); the meter re-derives nothing per frame.
+* **Cost, labeled with its context:** the meter's unit is **display-rate work, not per-block
+  audio** — **200.2–204.0 µs per `update + render_db` at 1024 bins × skirt radius D173**
+  (measured, quiet dev machine, the lead's gate, 2026-11-07; `tests/mask_bench.rs`, run
+  `--release -- --ignored`). Honest annotation the gate keeps: the bench's own `println`
+  carries an "UNDER PARALLEL-BUILD CONTENTION" label from its first run — that was the
+  context of the *bench author's* run, a historical note about where the number was born,
+  not this doc's measurement condition. The quiet-machine number above is the one the doc
+  quotes; contention never changes what is being proven (the cost is display-thread budget,
+  where even 204 µs at a few Hz is noise).
 
 ## Deferred (and why)
 
