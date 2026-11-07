@@ -17,6 +17,7 @@
 //! same signal (scaled/inverted) — no judgment, pure arithmetic.
 
 use crate::db::{db_to_lin, lin_to_db};
+use hathor_dsp_core::buffer::Block;
 
 /// Normalized (Pearson) correlation of two signals: `Σ(a·b) / sqrt(Σa²·Σb²)`.
 ///
@@ -167,10 +168,48 @@ pub fn null_residue_db(a: &[f32], b: &[f32], gain_db: f32, invert: bool) -> f32 
     lin_to_db(peak)
 }
 
+/// Multi-channel null test between two blocks: the **worst channel's**
+/// [`null_residue_db`], in dBFS.
+///
+/// The M3 acceptance shape ("residue below −30 dB in 40-120 Hz", band-limited
+/// by pre-filtering both signals): a null that holds on L while R leaks 1 % is
+/// a leak — averaging channels would hide it, so the aggregate answer is the
+/// maximum (worst) per-channel residue. Channels and frames are compared over
+/// the common minimum (the `min` doctrine of
+/// [`hathor_dsp_core::buffer::Block::mix_add`]); unpaired channels are
+/// outside the measurement, which IS the honest reading of "null them where
+/// both exist".
+///
+/// Identical inputs → `f32::NEG_INFINITY` (invariant 2, the floor demanded
+/// for identical signals); no compared region at all → `f32::NEG_INFINITY`;
+/// `NaN` anywhere in it → `NaN`, outranking even a perfect null of another
+/// channel (corruption beats silence, the module-header doctrine).
+pub fn block_null_residue_db(a: &Block<'_>, b: &Block<'_>, gain_db: f32, invert: bool) -> f32 {
+    let channels = a.channels().min(b.channels());
+    let frames = a.frames().min(b.frames());
+    let mut worst = f32::NEG_INFINITY;
+    for c in 0..channels {
+        let r = null_residue_db(
+            &a.channel_ref(c)[..frames],
+            &b.channel_ref(c)[..frames],
+            gain_db,
+            invert,
+        );
+        if r.is_nan() {
+            return r;
+        }
+        if r > worst {
+            worst = r;
+        }
+    }
+    worst // zero common channels: nothing survived the sum — honest silence
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::f32::consts::PI;
+    use hathor_dsp_core::buffer::ChannelBuffer;
 
     /// Deterministic RNG: numeric tests must not change from run to run
     /// (same Lcg as the filters tests — CONVENTION §4.4).
@@ -472,5 +511,104 @@ mod tests {
             (resid - want_db).abs() < 0.02,
             "residue → {resid:.4} dB, expected {want_db:.4} dB (20·log10(2·sin 9°))"
         );
+    }
+
+    #[test]
+    fn block_null_of_identical_stereo_reads_the_floor() {
+        // M3 acceptance's "identical signals → null = floor": −∞, not a magic
+        // number (invariant 2) and not 0 dB ("close enough" is a leak).
+        let mut a = ChannelBuffer::new(2, 8);
+        let mut b = ChannelBuffer::new(2, 8);
+        {
+            let mut ab = a.block();
+            for (i, s) in ab.channel(0).iter_mut().enumerate() {
+                *s = i as f32 * 0.1 - 0.35;
+            }
+            for (i, s) in ab.channel(1).iter_mut().enumerate() {
+                *s = 0.4 - i as f32 * 0.11;
+            }
+        }
+        // The read-only mirror is `ChannelBuffer::view` (a Block has no view —
+        // it *is* the view), and copy_from takes exactly it.
+        b.block().copy_from(&a.view());
+        assert!(block_null_residue_db(&a.block(), &b.block(), 0.0, true) == f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn block_null_reports_the_worst_channel_not_an_average() {
+        // L nulls perfectly (−∞); R has a 1 % amplitude error: b_R = 1.01·a_R,
+        // residue peak = 0.01·peak(a_R) = 0.01 exactly (a_R is full scale) →
+        // 20·log10(0.01) = −40.000 dBFS. An aggregate that averaged channels
+        // would read somewhere between −∞ and −40 and *pass* a −30 gate it
+        // must fail — the acceptance instrument cannot afford that arithmetic.
+        let mut a = ChannelBuffer::new(2, 4);
+        let mut b = ChannelBuffer::new(2, 4);
+        {
+            let mut ab = a.block();
+            ab.channel(0).copy_from_slice(&[0.3, -0.7, 0.5, 0.1]);
+            ab.channel(1).copy_from_slice(&[1.0, -1.0, 1.0, -1.0]);
+        }
+        {
+            let mut bb = b.block();
+            bb.channel(0).copy_from_slice(&[0.3, -0.7, 0.5, 0.1]); // perfect L
+            bb.channel(1).copy_from_slice(&[1.01, -1.01, 1.01, -1.01]); // 1 % R
+        }
+        let got = block_null_residue_db(&a.block(), &b.block(), 0.0, true) as f64;
+        assert!(
+            (got + 40.0).abs() < 0.01,
+            "worst-channel residue → {got:.4} dB, expected −40.000 (20·log10 0.01)"
+        );
+    }
+
+    #[test]
+    fn block_null_covers_gain_invert_and_shape_mismatch() {
+        // 3 dB of gain error between copies: residue peak = (1 − 10^(−3/20))·
+        // peak(a) = 0.2931·1.0 → 20·log10(0.2931) = −10.66 dBFS — comfortably
+        // below 0 but far above any acceptance gate. Frames/lengths mismatch:
+        // common minimum, per the min doctrine.
+        let mut a = ChannelBuffer::new(1, 4);
+        let mut b = ChannelBuffer::new(2, 4); // extra silent channel must not help
+        a.block()
+            .channel(0)
+            .copy_from_slice(&[1.0, -1.0, 1.0, -1.0]);
+        let g = 10.0f32.powf(-3.0 / 20.0); // −3 dB scale: 0.70795
+        b.block().channel(0).copy_from_slice(&[g, -g, g, -g]);
+        let got = block_null_residue_db(&a.block(), &b.block(), 0.0, true) as f64;
+        // Independent closed form, f64: residue peak = (1 − 10^(−3/20))·1.0
+        // = 0.29295… → 20·log10 = −10.655… dBFS.
+        let want = 20.0 * (1.0 - 10.0f64.powf(-3.0 / 20.0)).log10();
+        assert!(
+            (got - want).abs() < 0.02,
+            "−3 dB gain slip → {got:.4} dB, expected {want:.4}"
+        );
+        // Common minimum: b has fewer frames → tail of a ignored.
+        let mut big = ChannelBuffer::new(1, 4);
+        let mut small = ChannelBuffer::new(1, 2);
+        big.block()
+            .channel(0)
+            .copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+        small.block().channel(0).copy_from_slice(&[1.0, 1.0]);
+        assert!(
+            block_null_residue_db(&big.block(), &small.block(), 0.0, true) == f32::NEG_INFINITY
+        );
+        // Zero channels: honest floor, no division, no panic. One Block
+        // binding, measured against itself — two live `block()` calls on one
+        // buffer would be two mutable borrows.
+        let mut z = ChannelBuffer::new(0, 0);
+        let zb = z.block();
+        assert!(block_null_residue_db(&zb, &zb, 0.0, true) == f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn block_null_nan_beats_even_a_perfect_null() {
+        // Corruption outranks silence across the channel aggregate — a leaky
+        // NaN in R must not vanish behind L's −∞.
+        let mut a = ChannelBuffer::new(2, 2);
+        let mut b = ChannelBuffer::new(2, 2);
+        a.block().channel(0).copy_from_slice(&[1.0, 2.0]);
+        b.block().channel(0).copy_from_slice(&[1.0, 2.0]);
+        a.block().channel(1).copy_from_slice(&[f32::NAN, 0.5]);
+        b.block().channel(1).copy_from_slice(&[0.0, 0.5]);
+        assert!(block_null_residue_db(&a.block(), &b.block(), 0.0, true).is_nan());
     }
 }

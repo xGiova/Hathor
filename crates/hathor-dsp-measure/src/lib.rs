@@ -39,6 +39,17 @@
 //! as wideband phase, the null test as the most honest measurement) and §6
 //! (STFT for masking). Module spec:
 //! [docs/modules/hathor-dsp-measure.md](../../../docs/modules/hathor-dsp-measure.md).
+//!
+//! ## M2 additions (2026-11-07 POC fan-out)
+//!
+//! The spectral readings: [`phase_vector::PhaseVector`] (per-bin magnitude,
+//! principal/unwrapped phase and group delay over the frozen
+//! `hathor_dsp_fft::RealFftPlan` kernel — documented unwrap convention,
+//! documented DC/Nyquist exclusion), [`phase::block_null_residue_db`] (the M3
+//! acceptance shape: worst-channel block null), and the calibration sweet-spot
+//! metering primitive: [`RmsTracker::sweet_spot`] with [`SWEET_SPOT_TAU_S`],
+//! published lock-free through [`RmsTracker::publish_to`] (atomics, never a
+//! second buffer).
 
 #![warn(missing_docs)]
 // The "no unwrap" bans apply to production code, not to tests: in a test an
@@ -51,12 +62,14 @@
 pub mod db;
 pub mod levels;
 pub mod phase;
+pub mod phase_vector;
 pub mod tracker;
 
 pub use db::{db_to_lin, lin_to_db};
 pub use levels::{peak_db, rms_db};
-pub use phase::{correlation, null_residue_db, time_align_lag};
-pub use tracker::RmsTracker;
+pub use phase::{block_null_residue_db, correlation, null_residue_db, time_align_lag};
+pub use phase_vector::PhaseVector;
+pub use tracker::{RmsTracker, SWEET_SPOT_TAU_S};
 
 #[cfg(test)]
 mod guard_tests {
@@ -104,6 +117,10 @@ mod guard_tests {
         let b: Vec<f32> = a.iter().map(|x| 0.5 * x + 0.01).collect();
         let mut tracker = RmsTracker::new(0.3);
         tracker.set_time(48_000, 0.3);
+        // M2 surfaces: the PhaseVector's buffers and the AtomicParam cell are
+        // setup — both must be inside before entering the section.
+        let mut pv = PhaseVector::new(256);
+        let cell = hathor_dsp_core::param::AtomicParam::new(0.0, f32::MIN, f32::MAX);
         {
             let section = AudioSection::enter().expect("enter audio section");
             let blk = buf.block();
@@ -120,6 +137,19 @@ mod guard_tests {
             let d = black_box(db_to_lin(black_box(l as f32)));
             tracker.process_block(&blk);
             let t = black_box(tracker.rms_db());
+            // Unity gain: x − x is exactly zero in every channel → the floor.
+            // (Nulling a block against itself at −1 dB would LEAK 0.109·|x|
+            // and the assert below would fire — and a failed assert inside
+            // the section is a double panic: the abort swallows the message.
+            // The data must match the doctrine, not the other way round.)
+            let bn = black_box(block_null_residue_db(&blk, &blk, 0.0, true));
+            pv.analyze(blk.channel_ref(0));
+            pv.extract_phases();
+            let g = black_box(pv.group_delay()[7]);
+            black_box(pv.magnitudes());
+            let sweet = RmsTracker::sweet_spot();
+            sweet.publish_to(&cell);
+            let s = black_box(cell.load());
             assert_eq!(
                 section.allocs_here(),
                 0,
@@ -132,6 +162,18 @@ mod guard_tests {
             assert!(
                 c.is_finite() && n.is_finite() && d.is_finite(),
                 "sanity: pair measurements on real inputs (c={c}, n={n}, d={d})"
+            );
+            assert!(
+                g.is_finite(),
+                "sanity: group delay on a deterministic frame (g={g})"
+            );
+            assert!(
+                bn == f32::NEG_INFINITY,
+                "sanity: a block nulled against itself is the floor, even inside the guard (bn={bn})"
+            );
+            assert!(
+                s == f32::NEG_INFINITY,
+                "sanity: an untouched sweet-spot meter publishes silence as −∞ through the atomic (s={s})"
             );
         }
         assert!(!in_audio_section(), "the section must be released on Drop");

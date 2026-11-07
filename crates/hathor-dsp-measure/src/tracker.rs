@@ -14,13 +14,24 @@
 //! [`hathor_dsp_core::param::SmoothedParam`]: τ = the 63 % time constant,
 //! `coef = 1 − exp(−1/(τ·fs))` per frame.
 //!
-//! For the M6 calibration contract this is the honest-dBFS supplier: the UI maps
-//! `rms_db()` onto the sweet-spot band from the channel-strip contract
-//! (`reference_dbfs ± window`, −20…−14 dBFS by default). The band classification
-//! itself is consumer-side and deliberately *not* here (Deferred in the spec):
-//! a measurement library must not pre-guess the strip's policy.
+//! For the M6 calibration contract this is the honest-dBFS supplier, and
+//! specifically the **sweet-spot metering primitive** of
+//! [docs/modules/hathor-calibration-variance.md](../../../docs/modules/hathor-calibration-variance.md)
+//! §3: the 300 ms one-pole on the mean-square ([`SWEET_SPOT_TAU_S`]),
+//! publishing through the usual atomics ([`RmsTracker::publish_to`]) and never
+//! a second buffer. The UI maps `rms_db()` onto the sweet-spot band from the
+//! channel-strip contract (`reference_dbfs ± window`, −20…−14 dBFS by
+//! default). The band classification itself is consumer-side and deliberately
+//! *not* here (Deferred in the spec): a measurement library must not
+//! pre-guess the strip's policy.
 
 use hathor_dsp_core::buffer::Block;
+use hathor_dsp_core::param::AtomicParam;
+
+/// The sweet-spot metering window, seconds: the calibration doc's 300 ms —
+/// "fast enough to track a phrase, slow enough that the eye can read it" —
+/// realized by the one-pole below, *not* by a boxcar window.
+pub const SWEET_SPOT_TAU_S: f32 = 0.300;
 
 /// One-pole mean-square RMS tracker (`RmsTracker`) with a τ in seconds.
 ///
@@ -48,6 +59,14 @@ impl RmsTracker {
             coef: 1e-3,
             tau_s,
         }
+    }
+
+    /// The sweet-spot metering window: `RmsTracker::new(SWEET_SPOT_TAU_S)`
+    /// named for its consumer (the calibration strip). `set_time` with the
+    /// sample rate is still mandatory in `setup()` — the window is defined in
+    /// seconds, the coefficient in frames.
+    pub fn sweet_spot() -> Self {
+        Self::new(SWEET_SPOT_TAU_S)
     }
 
     /// Recomputes the coefficient from the sample rate and τ. Call in `setup()`
@@ -115,6 +134,19 @@ impl RmsTracker {
     /// "creeping".
     pub fn rms_db(&self) -> f32 {
         10.0 * self.mean_square.log10()
+    }
+
+    /// Publishes the current reading into the UI side of the usual atomic
+    /// channel — the calibration doc's §3 rule: atomics (architecture §2),
+    /// **never a second buffer**. [`AtomicParam`] is an `AtomicU32` bit-cast:
+    /// lock-free, tearing-free, and lossless across the whole float domain —
+    /// `NEG_INFINITY` (silence) and `NaN` (corruption) cross the boundary
+    /// untouched, which is exactly why the two honest readings of invariant 2
+    /// survive into the needle instead of being laundered into a number.
+    ///
+    /// Audio-thread side: one atomic store, zero allocation, zero lock.
+    pub fn publish_to(&self, out: &AtomicParam) {
+        out.store(self.rms_db());
     }
 }
 
@@ -311,5 +343,94 @@ mod tests {
         t.set_time(96_000, 0.3);
         assert_eq!(t.rms_db(), before, "set_time must not touch the state");
         assert_eq!(t.tau_s(), 0.3);
+    }
+
+    #[test]
+    fn sweet_spot_carries_the_300ms_window_contract() {
+        // The calibration doc's §3 number, pinned at the API level.
+        let t = RmsTracker::sweet_spot();
+        assert_eq!(t.tau_s(), 0.300);
+        assert!(
+            t.rms_db() == f32::NEG_INFINITY,
+            "a fresh meter is silence, never an invented level"
+        );
+    }
+
+    #[test]
+    fn publish_round_trips_every_honest_reading_bit_for_bit() {
+        // Silence, corruption and level must all cross the atomic boundary
+        // unchanged: the to_bits/from_bits pair of AtomicParam is lossless
+        // over the whole float domain — that is why the two special readings
+        // of invariant 2 survive into the needle.
+        let cell = AtomicParam::new(123.456, f32::MIN, f32::MAX);
+        let fresh = RmsTracker::sweet_spot();
+        fresh.publish_to(&cell);
+        assert!(
+            cell.load() == f32::NEG_INFINITY,
+            "silence must publish as −∞"
+        );
+
+        let mut poisoned = RmsTracker::sweet_spot();
+        poisoned.set_time(SR, 0.3);
+        let mut d = [0.5f32; 64];
+        d[0] = f32::NAN;
+        poisoned.process_block(&Block::from_slice(&mut d, Shape::new(1, 64)));
+        poisoned.publish_to(&cell);
+        assert!(cell.load().is_nan(), "corruption must publish as NaN");
+
+        let mut level = RmsTracker::sweet_spot();
+        level.set_time(SR, 0.3);
+        let mut d = [0.0f32; 64];
+        for _ in 0..4_000 {
+            level.process_block(&dc_block(&mut d, 0.5));
+        }
+        level.publish_to(&cell);
+        let got = cell.load();
+        assert_eq!(
+            got,
+            level.rms_db(),
+            "publish must be the reading, bit for bit"
+        );
+        assert!(
+            ((got as f64) + 6.020599913279624).abs() < 0.01,
+            "settled 0.5 DC must read −6.0206 dBFS across the atomic, got {got}"
+        );
+    }
+
+    #[test]
+    fn sine_at_minus_18_dbfs_peak_settles_at_minus_21_01_dbfs() {
+        // The sweet-spot primitive fed the calibration reference level:
+        // amplitude a = 10^(−18/20) → the honest *RMS* meter converges to
+        // −18 − 10·log10(2) = −21.010299956639812 dBFS (sine crest factor).
+        // One-pole accounting: 4000 blocks ≈ 5.3 s ≈ 17.7τ (settling error
+        // negligible) plus the documented ULP/coef plateau (≈0.004 dB) → the
+        // 0.03 dB measurement margin.
+        //
+        // NOTE for the M6 acceptance ("a sine at reference_dbfs reads 0 dBu
+        // ±0.1"): the strip must first decide whether its reference sine is
+        // *defined* in peak or in RMS — the 3.01 dB convention gap dwarfs
+        // this margin by two orders. This crate reports honest RMS and stays
+        // out of the policy (raised with the lead as a doc question).
+        let amp = 10.0f32.powf(-18.0 / 20.0);
+        let mut buf = ChannelBuffer::new(1, 64);
+        let mut t = RmsTracker::sweet_spot();
+        t.set_time(SR, SWEET_SPOT_TAU_S);
+        let mut frame = 0usize;
+        for _ in 0..4_000 {
+            {
+                let mut b = buf.block();
+                for s in b.channel(0).iter_mut() {
+                    *s = amp * (core::f32::consts::TAU * 1_000.0 * frame as f32 / SR as f32).sin();
+                    frame += 1;
+                }
+            }
+            t.process_block(&buf.block());
+        }
+        let got = t.rms_db() as f64;
+        let want = -18.0 - 3.010299956639812;
+        assert!(
+            (got - want).abs() < 0.03,
+            "−18 dBFS sine settled at {got:.4} dBFS, expected {want:.4}"
+        );
     }
 }
