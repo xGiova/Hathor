@@ -1,6 +1,6 @@
 # Module: `hathor-clap`
 
-> Status: **written, tested 28** — 25 unit + 2 integration + 1 doctest (debug+release,
+> Status: **written, tested 31** — 28 unit + 2 integration + 1 doctest (debug+release,
 > clippy `-D warnings`, fmt; the integration pair is the mock-host lifecycle proxy).
 > Dependencies: `clap-sys` 0.5.0 (the ABI truth, re-exported as `hathor_clap::sys`) and
 > `hathor-dsp-core` as a **normal dependency — approved 2026-11-05**: translating
@@ -111,7 +111,13 @@ none. `Host` is `Copy` (one pointer) and
 (hosts vary; expected, NOT VERIFIED). `ProcessView` maps frames, sample rate, `ctx()` (the
 core `ProcessCtx`), `transport_snapshot()` (the core `Transport`), per-channel slices/blocks
 both ways, `constant_mask` (exposed, **not interpreted**: every frame is processed
-regardless — correct, not optimal), and per-port `latency`. `ProcessView::from_sys` is
+regardless — correct, not optimal), and per-port `latency`. `channel_format(port, is_input)`
+answers the **64-bit question**: `clap_audio_buffer` is a two-pointer declaration and the
+format is the **XOR of the pair** — `data32` XOR `data64`, exactly one non-null *is* the
+width the host chose (`SampleFormat::F32`/`F64`); **both-or-neither is a malformed port:
+`None`, and consumers refuse rather than guessing which array the host meant**. f64 rows
+arrive through parallel accessors (`input_channel_f64`/`output_channel_f64`, same slice
+discipline); the f32 API is untouched. `ProcessView::from_sys` is
 **`pub const unsafe fn`** — public since task-5, the documented way to wrap a `clap_process`
 OUTSIDE a host callback (which is how a consumer's tests drive the real `Plugin::process`).
 Its Safety contract is spelled out: every buffer row non-null and sized by `frames_count`,
@@ -120,7 +126,9 @@ callback the wrapper discharges this from the vtable contract; outside one, the 
 assumes the verification burden exactly like the host would — a mistyped `channel_count`
 there is UB downstream, not a panic. **Caveat learned the hard way from the EQ tests
 (deviation #2):** `out_aliases_in` compares the channel pointers **pairwise** (`any` over
-`min(channel_count)`), not the `data32` arrays — hosts legitimately hand separate arrays
+`min(channel_count)`) — since task-11 **at both widths**: the f32 pair and the `data64`
+pair, one law not two (`out_aliases_in_spots_the_64_bit_pair` pins the 64-bit half) — not
+the `data32` arrays themselves: hosts legitimately hand separate arrays
 pointing at the same buffers. A mock that shares rows only *half-way* was producing **silent
 zeros, not errors**: aliasing is a port-level promise, partial aliasing is topology nobody
 declared, and the analyzer's spectrum rows survived only because they happened to be
@@ -175,7 +183,7 @@ it.
 
 ## Verification (tests, not opinions)
 
-* **25 unit** — `abi` 2 (the layout echo, the field-zero rule), `cstr` 3 (padded names
+* **28 unit** — `abi` 2 (the layout echo, the field-zero rule), `cstr` 3 (padded names
   terminate inside the host's array, the empty string, `clap_cstr!`'s static NUL),
   `descriptor` 3 (every field round-trips from its own `static`; address stability; a
   declared list survives assembly and **terminates NULL per clap.h** —
@@ -185,10 +193,13 @@ it.
   skipped in order; missing vtable slots read empty, never panic; pushes go through the
   host's `try_push`), `host` 3 (null host rejected at the door, equality is pointer
   equality, severities map to the CLAP constants), `plugin` 3 (`format_f64` short-and-exact,
-  padded-array writes, `ParamText` bounded by the host's capacity), `process` 5 (the
+  padded-array writes, `ParamText` bounded by the host's capacity), `process` 8 (the
   no-copy bridge **proven** — `block_view_writes_land_in_the_hosts_own_arrays`; inputs are
   reads and out-of-range answers `None`; `ctx` maps the core contract; transport flags map;
-  in-place pairs are reported).
+  in-place pairs are reported; task-11 adds the 64-bit half:
+   `f64_rows_land_in_the_hosts_own_arrays`, `channel_format_is_the_xor_of_the_pointer_pair`
+   (both-or-neither comes out `None` — refuse, never guess), and
+   `out_aliases_in_spots_the_64_bit_pair` — the one alias law now holds at both widths).
 * **2 integration** — `mock_host_full_lifecycle_and_alloc_contract`: the whole call order
   through `extern "C"`, sine in, output touched & non-NaN, then the allocation recipe:
   **warm-up `process` OUTSIDE the section first (lazy init must not hide inside the gate),

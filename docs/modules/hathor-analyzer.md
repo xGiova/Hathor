@@ -1,6 +1,6 @@
 # Module: `hathor-analyzer`
 
-> Status: **written, tested 17** — 8 unit + 3 mock-host lifecycle + 6 spectrum-proof
+> Status: **written, tested 18** — 8 unit + 3 mock-host lifecycle + 7 spectrum-proof
 > (debug+release, clippy `-D warnings`, fmt; the cost bench is `#[ignore]`d and therefore
 > excluded from the gate — run it explicitly). Dependencies: `hathor-clap` (path) and
 > `hathor-dsp-fft`; `hathor-dsp-core` is a
@@ -97,6 +97,12 @@ anything else is refused. Param order in `param_info` is the host's display list
   `ProcessView::from_sys` public with its Safety contract, so tests and host now walk the
   same code and "tested" cannot diverge from "shipped". The fabricated views live in the
   tests, each raw operation under its own SAFETY comment.
+* **The f64 path is shipped (task-11, 2026-11-07).** A host that hands `data64` rows gets the
+  same pass-through **bit-exact at double width**, and the downmix **sums in f64** — host
+  precision kept as long as it can be — paying **one single cast** into the mono scratch:
+  the bank is f32 by design (the task-4 decision) and 24-bit audio is the real precision
+  floor, so the cast discards nothing the host could have carried. Mixed or broken widths are
+  a malformed buffer per the wrapper's XOR law: refused **before any write**, never guessed.
 * **The rebuild decision — labeled.** `FftBank::new` is the bank's only allocation site, so
   the plugin builds it **exactly once, in `activate`** (main thread, outside any deadline),
   and the mono scratch is sized there to the host's advertised max block. A param changed
@@ -154,7 +160,7 @@ anything else is refused. Param order in `param_info` is the host's display list
   before any bank), `mono_in_copies_to_left_zeroes_right_and_still_drives_the_bank`,
   `oversized_block_is_refused_before_any_write` (65 frames on a 64-frame scratch: `Error`,
   and the output row still holds its pre-call `7.0` pattern — nothing was written).
-* **6 spectrum proofs** (`tests/spectrum_proof.rs`), driven through the **real
+* **7 spectrum proofs** (`tests/spectrum_proof.rs`), driven through the **real
   `Plugin::process` adapter** via a fabricated `clap_process` wrapped by the now-public
   `ProcessView::from_sys` — the same path a host takes — against an **independent oracle** — a
   direct Hann DFT summed in f64 over the exact last frame, plus re-derived axis arithmetic:
@@ -171,6 +177,11 @@ anything else is refused. Param order in `param_info` is the host's display list
   is vacuous") — `pass_through_keeps_distinct_channels_bit_exact`; in-place mode skips the
   copy but still analyzes — `in_place_mode_skips_the_copy_but_still_analyzes`; refusal
   paths (not-active, oversized, mismatched R) — `refuses_when_not_active_or_oversized`.
+   The **seventh proof is the 64-bit host**: a fabricated `data64` process must pass through
+   bit-exact **in double** and light the **same bin the oracle predicts, same tolerance of
+   0.3 dB** — `a_64_bit_host_is_bit_exact_and_lights_the_same_bin` — and the same test
+   exercises the **mixed-width refusal on the very first block: `Error` BEFORE any write**
+   (the writes-nothing assertion is part of its shape).
   Noise is the house deterministic Lcg — CONVENTION §5, no RNG in numeric work.
 * **3 lifecycle** (`tests/lifecycle.rs`) — the official **proxy**,
   `analyzer_lifecycle_through_the_c_abi`, driving the very static
