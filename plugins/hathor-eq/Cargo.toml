@@ -1,0 +1,31 @@
+[package]
+name = "hathor-eq"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "8-band parametric EQ as a CLAP plugin (headless v0, no GUI)"
+
+[lib]
+# cdylib: the `.clap` artifact a host loads (the exported `clap_entry` symbol).
+# rlib: lets the integration tests link this same code.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+hathor-clap = { path = "../../crates/hathor-clap" }
+hathor-dsp-filters.workspace = true
+
+[dev-dependencies]
+# Only the test binaries need the allocation guard; the plugin path itself
+# never references hathor-dsp-core directly.
+hathor-dsp-core.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+panic_in_result_fn = "deny"
+exit = "deny"
+todo = "deny"

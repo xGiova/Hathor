@@ -315,6 +315,16 @@ name = "hathor-dsp-measure"
 version = "0.0.0"
 dependencies = [
  "hathor-dsp-core",
+ "hathor-dsp-fft",
+]
+
+[[package]]
+name = "hathor-eq"
+version = "0.0.0"
+dependencies = [
+ "hathor-clap",
+ "hathor-dsp-core",
+ "hathor-dsp-filters",
 ]
 
 [[package]]
